@@ -19,7 +19,14 @@ See `AGENTS.md` for detailed debugging and agent guidance.
 See `CONTRIBUTING.md` for workflow and guidelines.
 
 ## CI publishing
-Pushes to `master` publish to the Marketplace via GitHub Actions.\nSet repository secret `VSCE_PAT` with Marketplace publish scope.
+Pushes to `master` publish to the Marketplace via GitHub Actions.
+Set repository secret `VSCE_PAT` with Marketplace publish scope.
+
+## Release process
+- Patch (bug fixes): `npm version patch --no-git-tag-version`
+- Minor (new features): `npm version minor --no-git-tag-version`
+- Major (breaking changes): `npm version major --no-git-tag-version`
+- Commit `package.json` and push to `master` to publish.
 
 ## Commands
 - `BL: Перейти к скомпилированному Java`
