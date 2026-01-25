@@ -1,0 +1,86 @@
+{
+  "name": "bl-language-support",
+  "displayName": "BL Language Support",
+  "description": "Language support for Z8 BL files with navigation and references",
+  "version": "1.0.0",
+  "publisher": "idfedorov09",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.60.0"
+  },
+  "categories": ["Programming Languages"],
+  "keywords": ["bl", "z8", "language", "extension", "syntax", "navigation"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/idfedorov09/bl-language-support.git"
+  },
+  "bugs": {
+    "url": "https://github.com/idfedorov09/bl-language-support/issues"
+  },
+  "homepage": "https://github.com/idfedorov09/bl-language-support#readme",
+  "activationEvents": ["onLanguage:bl", "onCommand:bl.showContext", "onCommand:bl.analyzeLine", "onCommand:bl.dumpDiagnostics"],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "bl",
+        "extensions": [".bl"],
+        "aliases": ["BL", "bl"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "bl.goToCompiledJava",
+        "title": "BL: Перейти к скомпилированному Java"
+      },
+      {
+        "command": "bl.goToNativeJava",
+        "title": "BL: Перейти к native Java"
+      },
+      {
+        "command": "bl.showContext",
+        "title": "BL: Show Context Debug"
+      },
+      {
+        "command": "bl.analyzeLine",
+        "title": "BL: Analyze Current Line"
+      },
+      {
+        "command": "bl.dumpDiagnostics",
+        "title": "BL: Dump Diagnostics"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "bl.goToCompiledJava",
+          "when": "resourceLangId == bl",
+          "group": "navigation@100"
+        },
+        {
+          "command": "bl.goToNativeJava",
+          "when": "resourceLangId == bl",
+          "group": "navigation@101"
+        },
+        {
+          "command": "bl.analyzeLine",
+          "when": "resourceLangId == bl",
+          "group": "navigation@200"
+        },
+        {
+          "command": "bl.dumpDiagnostics",
+          "when": "resourceLangId == bl",
+          "group": "navigation@201"
+        }
+      ]
+    },
+    "grammars": [
+      {
+        "language": "bl",
+        "scopeName": "source.bl",
+        "path": "./syntaxes/bl.tmLanguage.json"
+      }
+    ]
+  }
+}

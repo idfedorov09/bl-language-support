@@ -1,0 +1,194 @@
+{
+  "name": "BL",
+  "scopeName": "source.bl",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#guids" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#attributes" },
+    { "include": "#declarations" },
+    { "include": "#keywords" },
+    { "include": "#constants" },
+    { "include": "#types" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "name": "comment.line.double-slash.java", "begin": "//", "end": "$" },
+        { "name": "comment.block.java", "begin": "/\\*", "end": "\\*/" }
+      ]
+    },
+    "guids": {
+      "patterns": [
+        { "name": "constant.numeric.java", "match": "'[0-9A-Fa-f-]+'" }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        { "name": "string.quoted.double.java", "begin": "\"", "end": "\"", "patterns": [ { "name": "constant.character.escape.java", "match": "\\\\." } ] },
+        { "name": "string.quoted.single.java", "begin": "'", "end": "'", "patterns": [ { "name": "constant.character.escape.java", "match": "\\\\." } ] }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        { "name": "constant.numeric.java", "match": "\\b\\d+(?:\\.\\d+)?\\b" }
+      ]
+    },
+    "attributes": {
+      "patterns": [
+        {
+          "name": "meta.annotation.java",
+          "begin": "\\[",
+          "end": "\\]",
+          "patterns": [
+            { "name": "storage.type.annotation.java", "match": "\\b\\w+\\b" },
+            { "include": "#strings" },
+            { "include": "#numbers" },
+            { "include": "#constants" }
+          ]
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "name": "meta.class.java",
+          "match": "\\b(class)\\s+([A-Za-z_]\\w*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.java" },
+            "2": { "name": "entity.name.type.class.java" }
+          }
+        },
+        {
+          "name": "meta.enum.java",
+          "match": "\\b(enum)\\s+([A-Za-z_]\\w*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.java" },
+            "2": { "name": "entity.name.type.enum.java" }
+          }
+        },
+        {
+          "name": "meta.function.java",
+          "begin": "^\\s*(?=(?:(?:public|private|protected|static|final|virtual|abstract|auto)\\s+)+[A-Za-z_][\\w.]*\\s*(?:\\[[^\\]]*\\])?\\s+\\w+\\s*\\()",
+          "end": "$",
+          "patterns": [
+            { "include": "#keywords" },
+            { "include": "#types" },
+            { "name": "entity.name.function.java", "match": "\\b[A-Za-z_]\\w*\\b(?=\\s*\\()" }
+          ]
+        },
+        {
+          "name": "meta.field.constant.java",
+          "begin": "^\\s*(?=(?:(?:public|private|protected|static|final|virtual|abstract|auto)\\s+)*\\bfinal\\b\\s+[A-Za-z_][\\w.]*\\s*(?:\\[[^\\]]*\\])?\\s+\\w+\\s*(?:=|;))",
+          "end": "$",
+          "patterns": [
+            { "include": "#keywords" },
+            { "include": "#constants" },
+            { "include": "#types" },
+            { "include": "#guids" },
+            { "include": "#strings" },
+            { "include": "#numbers" },
+            { "name": "variable.other.constant.java", "match": "\\b[A-Za-z_]\\w*\\b(?=\\s*(?:=|;))" }
+          ]
+        },
+        {
+          "name": "meta.field.java",
+          "begin": "^\\s*(?=(?:(?:public|private|protected|static|virtual|abstract|auto)\\s+)+[A-Za-z_][\\w.]*\\s*(?:\\[[^\\]]*\\])?\\s+\\w+\\s*(?:=|;))",
+          "end": "$",
+          "patterns": [
+            { "include": "#keywords" },
+            { "include": "#constants" },
+            { "include": "#types" },
+            { "include": "#guids" },
+            { "include": "#strings" },
+            { "include": "#numbers" },
+            { "name": "variable.other.member.java", "match": "\\b[A-Za-z_]\\w*\\b(?=\\s*(?:=|;))" }
+          ]
+        },
+        {
+          "name": "meta.import.java",
+          "match": "^\\s*(import)\\s+([\\w.]+)",
+          "captures": {
+            "1": { "name": "keyword.declaration.java" },
+            "2": { "name": "entity.name.namespace.java" }
+          }
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        { "name": "keyword.declaration.java", "match": "\\b(class|enum|extends|import|records|operator|container|new|this|super)\\b" },
+        { "name": "storage.modifier.java storage.modifier keyword.modifier.java keyword.other.modifier", "match": "\\b(public|private|protected|static|final|virtual|abstract|auto)\\b" },
+        { "name": "keyword.control.java", "match": "\\b(if|else|for|while|do|try|catch|finally|throw|return|break)\\b" }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "meta.type.map.sql.bl",
+          "match": "\\b([A-Za-z_]\\w*)\\s*(\\[)\\s*(sql_[A-Za-z_]\\w*)\\s*(\\])",
+          "captures": {
+            "1": { "name": "storage.type.java" },
+            "2": { "name": "punctuation.section.brackets.java" },
+            "3": { "name": "storage.type.annotation.java" },
+            "4": { "name": "punctuation.section.brackets.java" }
+          }
+        },
+        {
+          "name": "meta.type.map.primitive.bl",
+          "match": "\\b([A-Za-z_]\\w*)\\s*(\\[)\\s*(string|int|bool|date|guid|decimal|binary|datespan|file|void|any|primary)\\s*(\\])",
+          "captures": {
+            "1": { "name": "storage.type.java" },
+            "2": { "name": "punctuation.section.brackets.java" },
+            "3": { "name": "storage.type.primitive.java" },
+            "4": { "name": "punctuation.section.brackets.java" }
+          }
+        },
+        {
+          "name": "meta.type.map.bl",
+          "match": "\\b([A-Za-z_]\\w*)\\s*(\\[)\\s*([A-Za-z_][\\w.]*)\\s*(\\])",
+          "captures": {
+            "1": { "name": "storage.type.java" },
+            "2": { "name": "punctuation.section.brackets.java" },
+            "3": { "name": "storage.type.java" },
+            "4": { "name": "punctuation.section.brackets.java" }
+          }
+        },
+        {
+          "name": "meta.type.array.sql.bl",
+          "match": "\\b(sql_[A-Za-z_]\\w*)\\s*(\\[\\])",
+          "captures": {
+            "1": { "name": "storage.type.annotation.java" },
+            "2": { "name": "punctuation.section.brackets.java" }
+          }
+        },
+        {
+          "name": "meta.type.array.primitive.bl",
+          "match": "\\b(string|int|bool|date|guid|decimal|binary|datespan|file|void|any|primary)\\s*(\\[\\])",
+          "captures": {
+            "1": { "name": "storage.type.primitive.java" },
+            "2": { "name": "punctuation.section.brackets.java" }
+          }
+        },
+        {
+          "name": "meta.type.array.bl",
+          "match": "\\b([A-Za-z_]\\w*)\\s*(\\[\\])",
+          "captures": {
+            "1": { "name": "storage.type.java" },
+            "2": { "name": "punctuation.section.brackets.java" }
+          }
+        },
+        { "name": "storage.type.primitive.java", "match": "\\b(string|int|bool|date|guid|decimal|binary|datespan|file|void|any|primary)\\b" },
+        { "name": "storage.type.annotation.java", "match": "\\bsql_[A-Za-z_]\\w*\\b" },
+        { "name": "storage.type.java", "match": "\\b(Object)\\b" },
+        { "name": "storage.type.java", "match": "\\b[A-Za-z_]\\w*\\b" }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        { "name": "constant.language.java", "match": "\\b(true|false|null)\\b" }
+      ]
+    }
+  }
+}
