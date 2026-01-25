@@ -1,6 +1,6 @@
 {
   "name": "bl-language-support",
-  "displayName": "BL Language Support",
+  "displayName": "Z8 BL Language Support",
   "description": "Language support for Z8 BL files with navigation and references",
   "version": "1.0.0",
   "publisher": "idfedorov09",
