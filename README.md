@@ -15,6 +15,12 @@ Language support for Z8 BL files in VS Code.
 
 See `AGENTS.md` for detailed debugging and agent guidance.
 
+## Contributing
+See `CONTRIBUTING.md` for workflow and guidelines.
+
+## CI publishing
+Pushes to `master` publish to the Marketplace via GitHub Actions.\nSet repository secret `VSCE_PAT` with Marketplace publish scope.
+
 ## Commands
 - `BL: Перейти к скомпилированному Java`
 - `BL: Перейти к native Java`
