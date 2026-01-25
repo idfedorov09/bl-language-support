@@ -2,7 +2,7 @@
   "name": "bl-language-support",
   "displayName": "Z8 BL Language Support",
   "description": "Language support for Z8 BL files with navigation and references",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "publisher": "idfedorov09",
   "license": "MIT",
   "icon": "icon.png",
