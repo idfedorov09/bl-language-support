@@ -2,15 +2,24 @@
   "name": "bl-language-support",
   "displayName": "Z8 BL Language Support",
   "description": "Language support for Z8 BL files with navigation and references",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "publisher": "idfedorov09",
   "license": "MIT",
   "icon": "icon.png",
   "engines": {
     "vscode": "^1.60.0"
   },
-  "categories": ["Programming Languages"],
-  "keywords": ["bl", "z8", "language", "extension", "syntax", "navigation"],
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "bl",
+    "z8",
+    "language",
+    "extension",
+    "syntax",
+    "navigation"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/idfedorov09/bl-language-support.git"
@@ -19,14 +28,24 @@
     "url": "https://github.com/idfedorov09/bl-language-support/issues"
   },
   "homepage": "https://github.com/idfedorov09/bl-language-support#readme",
-  "activationEvents": ["onLanguage:bl", "onCommand:bl.showContext", "onCommand:bl.analyzeLine", "onCommand:bl.dumpDiagnostics"],
+  "activationEvents": [
+    "onLanguage:bl",
+    "onCommand:bl.showContext",
+    "onCommand:bl.analyzeLine",
+    "onCommand:bl.dumpDiagnostics"
+  ],
   "main": "./extension.js",
   "contributes": {
     "languages": [
       {
         "id": "bl",
-        "extensions": [".bl"],
-        "aliases": ["BL", "bl"],
+        "extensions": [
+          ".bl"
+        ],
+        "aliases": [
+          "BL",
+          "bl"
+        ],
         "configuration": "./language-configuration.json"
       }
     ],
