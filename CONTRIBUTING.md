@@ -1,40 +1,40 @@
-# Contributing
+# Контрибьют
 
-Thanks for helping improve Z8 BL Language Support.
+Спасибо за помощь в улучшении поддержки языка Z8 BL.
 
-## Where to contribute
-- **master** is the release branch.
-- **dev** is the development branch.
+## Куда вносить изменения
+- **master** — релизная ветка.
+- **dev** — ветка разработки.
 
-Please create your branch from `dev` and open PRs **into `dev`**. Avoid direct pushes to `master`.
+Создавайте свою ветку от `dev` и открывайте PR **в `dev`**. Избегайте прямых пушей в `master`.
 
-## Development setup
-1) Clone the repo
-2) Open in VS Code
-3) Run the extension in a dev host:
-   - Press `F5` (Run and Debug)
-   - Or run `code --extensionDevelopmentPath=.`
+## Настройка разработки
+1) Склонируйте репозиторий
+2) Откройте в VS Code
+3) Запустите расширение в dev‑хосте:
+   - `F5` (Run and Debug)
+   - или `code --extensionDevelopmentPath=.`
 
-## Testing changes
-- Verify diagnostics and navigation in sample `.bl` files.
-- Use `BL: Analyze Current Line` and `BL: Dump Diagnostics` for debugging.
-- See `AGENTS.md` for detailed diagnostics and tracing.
+## Тестирование изменений
+- Проверьте диагностики и навигацию на примерах `.bl` файлов.
+- Используйте `BL: Анализ текущей строки` и `BL: Вывод диагностик`.
+- Подробности в `AGENTS.md`.
 
-## Style and conventions
-- Keep changes small and focused.
-- Prefer readable code over clever code.
-- Keep files ASCII when possible.
-- Update or add comments only when logic is non-obvious.
+## Стиль и соглашения
+- Держите изменения небольшими и сфокусированными.
+- Предпочитайте читаемый код «хитрому».
+- По возможности оставляйте файлы в ASCII.
+- Добавляйте комментарии только если логика неочевидна.
 
-## Pull requests
-Include in your PR description:
-- What was changed and why.
-- How it was tested (steps + sample files).
-- Any known limitations.
+## Pull Request
+Укажите в PR:
+- Что изменено и почему.
+- Как тестировалось (шаги + примеры файлов).
+- Известные ограничения.
 
-## Reporting issues
-Please include:
-- File path and line number
-- Output from `BL: Dump Diagnostics`
-- Output from `BL: Analyze Current Line`
-- Where Ctrl/Cmd+Click navigates (if wrong)
+## Репорт багов
+Пожалуйста, приложите:
+- Путь к файлу и номер строки
+- Вывод `BL: Вывод диагностик`
+- Вывод `BL: Анализ текущей строки`
+- Куда ведёт Ctrl/Cmd+Click (если ведёт неверно)

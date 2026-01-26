@@ -1,7 +1,7 @@
 {
   "name": "bl-language-support",
-  "displayName": "Z8 BL Language Support",
-  "description": "Language support for Z8 BL files with navigation and references",
+  "displayName": "Поддержка языка Z8 BL",
+  "description": "Поддержка языка Z8 BL для VS Code: навигация и ссылки",
   "version": "1.0.3",
   "publisher": "idfedorov09",
   "license": "MIT",
@@ -56,19 +56,19 @@
       },
       {
         "command": "bl.goToNativeJava",
-        "title": "BL: Перейти к native Java"
+        "title": "BL: Перейти к нативному Java"
       },
       {
         "command": "bl.showContext",
-        "title": "BL: Show Context Debug"
+        "title": "BL: Показать контекст (debug)"
       },
       {
         "command": "bl.analyzeLine",
-        "title": "BL: Analyze Current Line"
+        "title": "BL: Анализ текущей строки"
       },
       {
         "command": "bl.dumpDiagnostics",
-        "title": "BL: Dump Diagnostics"
+        "title": "BL: Вывод диагностик"
       }
     ],
     "menus": {

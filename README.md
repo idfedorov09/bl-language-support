@@ -1,42 +1,42 @@
-# BL Language Support
+# Поддержка языка Z8 BL
 
-Language support for Z8 BL files in VS Code.
+Поддержка языка Z8 BL для VS Code.
 
-## Features
-- Go to definition for classes, methods, members, and imports.
-- References for methods and identifiers.
-- Diagnostics for unknown methods/members and basic syntax issues.
-- Navigation to compiled Java and native Java (when available).
-- Syntax highlighting for BL specifics.
+## Возможности
+- Переход к определению классов, методов, полей и импортов.
+- Поиск ссылок для методов и идентификаторов.
+- Диагностика неизвестных методов/полей и базовых синтаксических ошибок.
+- Навигация к скомпилированному Java и native Java (если доступно).
+- Подсветка синтаксиса с учетом особенностей BL.
 
-## Debugging
-- `BL: Analyze Current Line` — inspect parsed chains and type resolution.
-- `BL: Dump Diagnostics` — list diagnostics with source and code.
+## Отладка
+- `BL: Анализ текущей строки` — разбор цепочек и резолвинг типов.
+- `BL: Вывод диагностик` — список диагностик с источником и кодом.
 
-See `AGENTS.md` for detailed debugging and agent guidance.
+Подробная отладка и рекомендации для агентов: `AGENTS.md`.
 
-## Contributing
-See `CONTRIBUTING.md` for workflow and guidelines.
+## Контрибьют
+См. `CONTRIBUTING.md` для правил и процесса.
 
-## CI publishing
-Pushes to `master` publish to the Marketplace via GitHub Actions.
-Set repository secret `VSCE_PAT` with Marketplace publish scope.
+## CI-публикация
+Пуши в `master` публикуют расширение в Marketplace через GitHub Actions.
+Нужен секрет репозитория `VSCE_PAT` с правами Marketplace publish.
 
-## Release process
-- Patch (bug fixes): `npm version patch --no-git-tag-version`
-- Minor (new features): `npm version minor --no-git-tag-version`
-- Major (breaking changes): `npm version major --no-git-tag-version`
-- Commit `package.json` and push to `master` to publish.
+## Процесс релиза
+- Patch (исправления): `npm version patch --no-git-tag-version`
+- Minor (новые фичи): `npm version minor --no-git-tag-version`
+- Major (ломающие изменения): `npm version major --no-git-tag-version`
+- Закоммитить `package.json` и запушить в `master` для публикации.
 
-## Commands
+## Команды
 - `BL: Перейти к скомпилированному Java`
-- `BL: Перейти к native Java`
-- `BL: Show Context Debug`
-- `BL: Analyze Current Line`
-- `BL: Dump Diagnostics`
+- `BL: Перейти к нативному Java`
+- `BL: Показать контекст (debug)`
+- `BL: Анализ текущей строки`
+- `BL: Вывод диагностик`
 
-## Requirements
-No external dependencies.
+## Требования
+Нет внешних зависимостей.
 
-## License
+## Лицензия
 MIT

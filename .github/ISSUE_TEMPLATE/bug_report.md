@@ -1,21 +1,21 @@
 ---
-name: Bug report
-about: Report a problem in the BL extension
+name: Баг
+about: Сообщить о проблеме в расширении BL
 labels: bug
 ---
 
-## Description
+## Описание
 
-## Steps to reproduce
+## Шаги воспроизведения
 
-## Expected behavior
+## Ожидаемое поведение
 
-## Actual behavior
+## Фактическое поведение
 
-## Diagnostics
-- `BL: Dump Diagnostics` output:
-- `BL: Analyze Current Line` output:
+## Диагностика
+- Вывод `BL: Вывод диагностик`:
+- Вывод `BL: Анализ текущей строки`:
 
-## Environment
-- VS Code version:
-- OS:
+## Окружение
+- Версия VS Code:
+- ОС:

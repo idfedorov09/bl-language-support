@@ -396,7 +396,7 @@ function collectDiagnostics(document, contextClass) {
                 if (modifierMatch) {
                     const start = cleanLine.indexOf(modifierMatch[0], returnMatch.index);
                     const range = new vscode.Range(line, start, line, start + modifierMatch[0].length);
-                const diag = new vscode.Diagnostic(range, 'Unexpected modifier after return', vscode.DiagnosticSeverity.Error);
+                const diag = new vscode.Diagnostic(range, 'Неожиданный модификатор после return', vscode.DiagnosticSeverity.Error);
                 diag.source = 'BL';
                 diag.code = 'return-modifier';
                 diagnostics.push(diag);
@@ -412,7 +412,7 @@ function collectDiagnostics(document, contextClass) {
                 const last = stack.pop();
                 if (!last || last.ch !== expected) {
                     const range = new vscode.Range(line, col, line, col + 1);
-                    const diag = new vscode.Diagnostic(range, 'Unmatched closing bracket', vscode.DiagnosticSeverity.Error);
+                    const diag = new vscode.Diagnostic(range, 'Лишняя закрывающая скобка', vscode.DiagnosticSeverity.Error);
                     diag.source = 'BL';
                     diag.code = 'brace';
                     diagnostics.push(diag);
@@ -532,8 +532,8 @@ function collectDiagnostics(document, contextClass) {
                         if (!foundAny && hadNonNative && !hasArrayLike) {
                             const column = chain.start + segment.offset;
                             const range = new vscode.Range(line, column, line, column + segment.name.length);
-                            const kind = segment.isCall ? 'method' : 'member';
-                            const diag = new vscode.Diagnostic(range, `Unknown ${kind} '${segment.name}'`, vscode.DiagnosticSeverity.Error);
+                            const kind = segment.isCall ? 'метод' : 'поле';
+                            const diag = new vscode.Diagnostic(range, `Неизвестный ${kind} '${segment.name}'`, vscode.DiagnosticSeverity.Error);
                             diag.source = 'BL';
                             diag.code = 'chain';
                             diagnostics.push(diag);
@@ -596,7 +596,7 @@ function collectDiagnostics(document, contextClass) {
                 const method = index.findMethodInClassChain(effectiveContext, name);
                 if (!method && !localMethod) {
                     const range = new vscode.Range(line, nameIndex, line, nameIndex + name.length);
-                    const diag = new vscode.Diagnostic(range, `Unknown method '${name}'`, vscode.DiagnosticSeverity.Error);
+                    const diag = new vscode.Diagnostic(range, `Неизвестный метод '${name}'`, vscode.DiagnosticSeverity.Error);
                     diag.source = 'BL';
                     diag.code = 'call';
                     diagnostics.push(diag);
@@ -625,7 +625,7 @@ function collectDiagnostics(document, contextClass) {
 
     for (const item of stack) {
         const range = new vscode.Range(item.line, item.col, item.line, item.col + 1);
-        const diag = new vscode.Diagnostic(range, 'Unclosed bracket', vscode.DiagnosticSeverity.Error);
+        const diag = new vscode.Diagnostic(range, 'Незакрытая скобка', vscode.DiagnosticSeverity.Error);
         diag.source = 'BL';
         diag.code = 'brace';
         diagnostics.push(diag);
@@ -1522,21 +1522,21 @@ function showDebugContext(outputChannel) {
     }
 
     vscode.window.showInformationMessage(
-        `BL Context: ${effectiveContext ? effectiveContext.fullName : 'none'} | word=${wordInfo ? wordInfo.word : 'none'}`
+        `BL контекст: ${effectiveContext ? effectiveContext.fullName : 'нет'} | слово=${wordInfo ? wordInfo.word : 'нет'}`
     );
 }
 
 function showLineAnalysis(outputChannel) {
     const editor = vscode.window.activeTextEditor;
     if (!editor) {
-        vscode.window.showWarningMessage('No active editor');
+        vscode.window.showWarningMessage('Нет активного редактора');
         return;
     }
 
     const document = editor.document;
     const position = editor.selection.active;
     if (document.languageId !== 'bl') {
-        vscode.window.showWarningMessage('This command works only for .bl files');
+        vscode.window.showWarningMessage('Эта команда работает только для .bl файлов');
         return;
     }
 
@@ -1634,13 +1634,13 @@ function showLineAnalysis(outputChannel) {
 function showDiagnosticsDump(outputChannel) {
     const editor = vscode.window.activeTextEditor;
     if (!editor) {
-        vscode.window.showWarningMessage('No active editor');
+        vscode.window.showWarningMessage('Нет активного редактора');
         return;
     }
 
     const document = editor.document;
     if (document.languageId !== 'bl') {
-        vscode.window.showWarningMessage('This command works only for .bl files');
+        vscode.window.showWarningMessage('Эта команда работает только для .bl файлов');
         return;
     }
 

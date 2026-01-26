@@ -1,13 +1,13 @@
 ---
-name: Feature request
-about: Suggest an improvement
+name: Улучшение
+about: Предложить улучшение
 labels: enhancement
 ---
 
-## Problem
+## Проблема
 
-## Proposed solution
+## Предлагаемое решение
 
-## Alternatives
+## Альтернативы
 
-## Additional context
+## Дополнительный контекст
