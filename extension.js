@@ -646,6 +646,27 @@ function getWordAtPosition(document, position) {
     return { word: document.getText(range), range };
 }
 
+function getAttributeNameAt(line, wordRange) {
+    const start = wordRange.start.character;
+    const before = line.slice(0, start);
+    const lastOpen = before.lastIndexOf('[');
+    const lastClose = before.lastIndexOf(']');
+    if (lastOpen === -1 || lastOpen < lastClose) return null;
+
+    const afterOpen = line.slice(lastOpen + 1);
+    const match = afterOpen.match(/^\s*(\w+)/);
+    if (!match) return null;
+
+    const attrName = match[1];
+    const attrIndex = lastOpen + 1 + afterOpen.indexOf(attrName);
+    if (attrIndex !== start) return null;
+
+    const closeIndex = line.indexOf(']', start);
+    if (closeIndex === -1) return null;
+
+    return attrName;
+}
+
 function isMethodCallAt(document, wordRange) {
     const line = document.lineAt(wordRange.start.line).text;
     const after = line.slice(wordRange.end.character);
@@ -707,6 +728,32 @@ async function findMethodReferences(methodName, token) {
 
 function escapeRegex(text) {
     return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+async function findAttributeDefinitionLocation(attributeName) {
+    const javaFile = await findJavaFileByClassName('org.zenframework.z8.compiler.core.IAttribute');
+    if (!javaFile) return null;
+
+    try {
+        const content = fs.readFileSync(javaFile, 'utf8');
+        const lines = content.split(/\r?\n/);
+        const attrRegex = new RegExp(`\\bString\\s+(\\w+)\\s*=\\s*\"${escapeRegex(attributeName)}\"`);
+
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
+            const match = line.match(attrRegex);
+            if (match) {
+                const name = match[1];
+                const column = line.indexOf(name);
+                const pos = new vscode.Position(i, Math.max(0, column));
+                return new vscode.Location(vscode.Uri.file(javaFile), pos);
+            }
+        }
+
+        return new vscode.Location(vscode.Uri.file(javaFile), new vscode.Position(0, 0));
+    } catch (err) {
+        return null;
+    }
 }
 
 async function findIdentifierReferences(identifier, token) {
@@ -974,6 +1021,13 @@ class BlDefinitionProvider {
         const contextClass = inlineContext ? inlineContext.info : baseContextClass;
 
         if (!contextClass) return null;
+
+        const attrName = getAttributeNameAt(line, wordInfo.range);
+        if (attrName) {
+            const attrLocation = await findAttributeDefinitionLocation(attrName);
+            if (attrLocation) return attrLocation;
+            return null;
+        }
 
         const importMatch = line.match(/^\s*import\s+([\w.]+)\s*;/);
         if (importMatch) {
