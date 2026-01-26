@@ -105,13 +105,6 @@
         "scopeName": "source.bl",
         "path": "./syntaxes/bl.tmLanguage.json"
       }
-    ],
-    "iconThemes": [
-      {
-        "id": "bl-file-icons",
-        "label": "BL File Icons (Minimal)",
-        "path": "./file-icons/bl-file-icon-theme.json"
-      }
     ]
   }
 }

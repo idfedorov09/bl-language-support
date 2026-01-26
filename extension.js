@@ -11,9 +11,6 @@ const {
 const index = new BlIndex();
 let debugOutput = null;
 
-const BL_ICON_THEME_ID = 'bl-file-icons';
-const BL_ICON_THEME_PROMPT_KEY = 'bl.iconThemePrompted';
-
 const TYPE_PATTERN = String.raw`[A-Za-z_][\w.]*\s*(?:\[[^\]]*\])*`;
 const METHOD_DEF_RE = /^\s*(?:(?:static|virtual|final|auto|abstract)\s+)*(?:public|private|protected)?\s*(?:(?:static|virtual|final|auto|abstract)\s+)*([A-Za-z_][\w.]*\s*(?:\[[^\]]*\])*)\s+(\w+)\s*\(/;
 const FIELD_DEF_RE = /^\s*(?:(?:static|virtual|final|auto|abstract)\s+)*(?:public|private|protected)?\s*(?:(?:static|virtual|final|auto|abstract)\s+)*([A-Za-z_][\w.]*\s*(?:\[[^\]]*\])*)\s+(\w+)\s*[=;]/;
@@ -131,27 +128,6 @@ function stripInlineAttributes(line) {
     }
 
     return out;
-}
-
-async function promptForFileIconTheme(context) {
-    const config = vscode.workspace.getConfiguration('workbench');
-    const currentTheme = config.get('iconTheme');
-    const prompted = context.globalState.get(BL_ICON_THEME_PROMPT_KEY);
-    if (currentTheme === BL_ICON_THEME_ID || prompted) {
-        return;
-    }
-
-    const action = await vscode.window.showInformationMessage(
-        'Для .bl файлов доступна иконка. Включить тему иконок BL?',
-        'Включить'
-    );
-    if (action === 'Включить') {
-        const target = vscode.workspace.workspaceFolders?.length
-            ? vscode.ConfigurationTarget.Workspace
-            : vscode.ConfigurationTarget.Global;
-        await config.update('iconTheme', BL_ICON_THEME_ID, target);
-    }
-    await context.globalState.update(BL_ICON_THEME_PROMPT_KEY, true);
 }
 
 function parseInlineClassType(line) {
@@ -1836,8 +1812,6 @@ async function activate(context) {
     if (vscode.window.activeTextEditor) {
         updateDiagnostics(vscode.window.activeTextEditor.document, diagnostics);
     }
-
-    await promptForFileIconTheme(context);
 
     console.log('BL Language Support extension activated');
 }
