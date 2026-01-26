@@ -46,6 +46,10 @@
           "BL",
           "bl"
         ],
+        "icon": {
+          "light": "./images/bl-file-icon.png",
+          "dark": "./images/bl-file-icon.png"
+        },
         "configuration": "./language-configuration.json"
       }
     ],
@@ -100,6 +104,13 @@
         "language": "bl",
         "scopeName": "source.bl",
         "path": "./syntaxes/bl.tmLanguage.json"
+      }
+    ],
+    "iconThemes": [
+      {
+        "id": "bl-file-icons",
+        "label": "BL File Icons (Minimal)",
+        "path": "./file-icons/bl-file-icon-theme.json"
       }
     ]
   }
