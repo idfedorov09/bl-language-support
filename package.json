@@ -2,7 +2,7 @@
   "name": "bl-language-support",
   "displayName": "Поддержка языка Z8 BL",
   "description": "Поддержка языка Z8 BL для VS Code: навигация и ссылки",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "publisher": "idfedorov09",
   "license": "MIT",
   "icon": "icon.png",
