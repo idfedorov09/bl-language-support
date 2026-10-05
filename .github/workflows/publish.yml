@@ -13,9 +13,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
+      - name: Test
+        run: npm test
       - name: Install vsce
-        run: npm install -g @vscode/vsce
+        run: npm install -g @vscode/vsce@4.0.0
       - name: Publish
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}

@@ -5,17 +5,22 @@ const fs = require('fs');
 const {
     BlIndex,
     getBlRootFromFilePath,
-    getModuleRootFromBlFile
+    getModuleRootFromBlFile,
+    sanitizeText,
+    stripInlineAttributes
 } = require('./blIndex');
 
 const index = new BlIndex();
 let debugOutput = null;
+const documentIndex = new WeakMap();
+const lexicalDocuments = new WeakMap();
 
 const TYPE_PATTERN = String.raw`[A-Za-z_][\w.]*\s*(?:\[[^\]]*\])*`;
 const METHOD_DEF_RE = /^\s*(?:(?:static|virtual|final|auto|abstract)\s+)*(?:public|private|protected)?\s*(?:(?:static|virtual|final|auto|abstract)\s+)*([A-Za-z_][\w.]*\s*(?:\[[^\]]*\])*)\s+(\w+)\s*\(/;
 const FIELD_DEF_RE = /^\s*(?:(?:static|virtual|final|auto|abstract)\s+)*(?:public|private|protected)?\s*(?:(?:static|virtual|final|auto|abstract)\s+)*([A-Za-z_][\w.]*\s*(?:\[[^\]]*\])*)\s+(\w+)\s*[=;]/;
 const MODIFIER_RE = /\b(public|private|protected|static|final|virtual|abstract|auto)\b/;
 const MODIFIERS_RE = /\b(public|private|protected|static|final|virtual|abstract|auto)\b/g;
+const STATEMENT_TYPES = new Set(['return', 'if', 'else', 'while', 'for', 'throw', 'try', 'catch', 'new', 'auto']);
 
 async function buildIndex() {
     const blFiles = await vscode.workspace.findFiles('**/*.bl', '**/node_modules/**');
@@ -23,111 +28,21 @@ async function buildIndex() {
 }
 
 function updateIndexFromDocument(document) {
-    return index.updateFromText(document.uri.fsPath, document.getText());
+    const text = document.getText();
+    const cached = documentIndex.get(document);
+    if (cached && cached.text === text && index.getClassByFile(document.uri.fsPath) === cached.info) return cached.info;
+    const info = index.updateFromText(document.uri.fsPath, text);
+    documentIndex.set(document, { text, info });
+    return info;
 }
 
-function sanitizeText(text) {
-    let out = '';
-    let inLine = false;
-    let inBlock = false;
-    let inString = null;
-    let escape = false;
-
-    for (let i = 0; i < text.length; i++) {
-        const ch = text[i];
-        const next = i + 1 < text.length ? text[i + 1] : '';
-
-        if (inLine) {
-            if (ch === '\n') {
-                inLine = false;
-                out += '\n';
-            } else {
-                out += ' ';
-            }
-            continue;
-        }
-
-        if (inBlock) {
-            if (ch === '*' && next === '/') {
-                inBlock = false;
-                out += '  ';
-                i++;
-            } else if (ch === '\n') {
-                out += '\n';
-            } else {
-                out += ' ';
-            }
-            continue;
-        }
-
-        if (inString) {
-            if (escape) {
-                escape = false;
-                out += ' ';
-                continue;
-            }
-            if (ch === '\\') {
-                escape = true;
-                out += ' ';
-                continue;
-            }
-            if (ch === '\n') {
-                out += '\n';
-                continue;
-            }
-            if (ch === inString) {
-                inString = null;
-            }
-            out += ' ';
-            continue;
-        }
-
-        if (ch === '/' && next === '/') {
-            inLine = true;
-            out += '  ';
-            i++;
-            continue;
-        }
-        if (ch === '/' && next === '*') {
-            inBlock = true;
-            out += '  ';
-            i++;
-            continue;
-        }
-        if (ch === '"' || ch === "'") {
-            inString = ch;
-            out += ' ';
-            continue;
-        }
-
-        out += ch;
-    }
-
-    return out;
-}
-
-function stripInlineAttributes(line) {
-    let out = '';
-    let i = 0;
-
-    while (i < line.length) {
-        const ch = line[i];
-        const prev = i > 0 ? line[i - 1] : '';
-
-        if (ch === '[' && (i === 0 || /\s/.test(prev))) {
-            const end = line.indexOf(']', i + 1);
-            if (end !== -1) {
-                i = end + 1;
-                while (i < line.length && /\s/.test(line[i])) i++;
-                continue;
-            }
-        }
-
-        out += ch;
-        i += 1;
-    }
-
-    return out;
+function getCodeLines(document) {
+    const text = document.getText();
+    const cached = lexicalDocuments.get(document);
+    if (cached && cached.text === text) return cached.lines;
+    const lines = sanitizeText(text).split(/\r?\n/);
+    lexicalDocuments.set(document, { text, lines });
+    return lines;
 }
 
 function parseInlineClassType(line) {
@@ -153,8 +68,7 @@ function findExplicitImport(contextClass, name) {
 
 function getInlineContextMap(document, baseContext) {
     if (!document || !baseContext) return null;
-    const text = sanitizeText(document.getText());
-    const lines = text.split(/\r?\n/);
+    const lines = getCodeLines(document);
     const map = new Array(lines.length).fill(null);
     const inlineStack = [];
     let braceDepth = 0;
@@ -249,7 +163,7 @@ function scanBalanced(text, startIndex, openChar, closeChar) {
     return null;
 }
 
-function parseChainAt(text, startIndex) {
+function parseChainAt(text, startIndex, allowSingle = false) {
     let i = startIndex;
     const segments = [];
     const length = text.length;
@@ -286,17 +200,17 @@ function parseChainAt(text, startIndex) {
         if (!isIdentifierStart(text[i])) break;
     }
 
-    if (segments.length < 2) return null;
+    if (segments.length < 2 && !allowSingle) return null;
     return { start: startIndex, end: i, segments };
 }
 
-function findChainsInLine(text) {
+function findChainsInLine(text, allowSingle = false) {
     const chains = [];
     for (let i = 0; i < text.length; i++) {
         if (!isIdentifierStart(text[i])) continue;
         const prev = i > 0 ? text[i - 1] : '';
         if (isIdentifierChar(prev) || prev === '.') continue;
-        const chain = parseChainAt(text, i);
+        const chain = parseChainAt(text, i, allowSingle);
         if (chain) chains.push(chain);
     }
     return chains;
@@ -377,8 +291,7 @@ function resolveIdentifierTypeName(context, document, position, name) {
 }
 
 function collectDiagnostics(document, contextClass) {
-    const text = sanitizeText(document.getText());
-    const lines = text.split(/\r?\n/);
+    const lines = getCodeLines(document);
     const diagnostics = [];
     const stack = [];
     const inlineContextMap = getInlineContextMap(document, contextClass);
@@ -674,8 +587,7 @@ function isMethodCallAt(document, wordRange) {
 }
 
 function isInRecordsBlock(document, targetLine) {
-    const text = sanitizeText(document.getText());
-    const lines = text.split(/\r?\n/);
+    const lines = getCodeLines(document);
     let braceDepth = 0;
     let recordsDepth = null;
     let pendingRecords = false;
@@ -710,7 +622,9 @@ function isInRecordsBlock(document, targetLine) {
 }
 
 function getNativeAttribute(text) {
-    const match = text.match(/\[(?:native|primary)\s+"([^"]+)"\]/);
+    const declaration = sanitizeText(text).search(/\b(?:class|enum)\s+\w+/);
+    const prefix = declaration < 0 ? text : text.slice(0, declaration);
+    const match = sanitizeText(prefix, false).match(/\[(?:native|primary)\s+"([^"]+)"\]/);
     return match ? match[1] : null;
 }
 
@@ -724,50 +638,21 @@ function findCompiledJavaFile(blFilePath) {
     return fs.existsSync(compiledPath) ? compiledPath : null;
 }
 
-async function findJavaFileByClassName(className) {
+async function findJavaFileByClassName(className, blFilePath) {
     const rel = className.replace(/\./g, '/') + '.java';
-    const files = await vscode.workspace.findFiles(`**/src/main/java/${rel}`, '**/node_modules/**', 1);
-    if (files.length > 0) return files[0].fsPath;
-
-    const alt = await vscode.workspace.findFiles(`**/src/java/${rel}`, '**/node_modules/**', 1);
-    if (alt.length > 0) return alt[0].fsPath;
-
-    return null;
-}
-
-async function findMethodReferences(methodName, token) {
-    const results = [];
-    const blFiles = await vscode.workspace.findFiles('**/*.bl', '**/node_modules/**');
-    const callRegex = new RegExp(`\\b${methodName}\\s*\\(`);
-
-    for (const fileUri of blFiles) {
-        if (token && token.isCancellationRequested) break;
-        try {
-            const content = fs.readFileSync(fileUri.fsPath, 'utf8');
-            const lines = content.split(/\r?\n/);
-            for (let i = 0; i < lines.length; i++) {
-                const line = lines[i];
-                if (!callRegex.test(line)) continue;
-
-                const idx = line.indexOf(methodName);
-                if (idx !== -1) {
-                    results.push(new vscode.Location(fileUri, new vscode.Position(i, idx)));
-                }
-            }
-        } catch (err) {
-            // ignore
-        }
-    }
-
-    return results;
+    const files = await vscode.workspace.findFiles(`**/src/main/java/${rel}`, '**/node_modules/**');
+    const alt = await vscode.workspace.findFiles(`**/src/java/${rel}`, '**/node_modules/**');
+    const context = blFilePath ? { moduleRoot: getModuleRootFromBlFile(blFilePath) || path.dirname(blFilePath) } : null;
+    const nearby = index.preferNearbyClasses(context, [...files, ...alt].map(file => ({ filePath: file.fsPath, moduleRoot: path.dirname(file.fsPath) })));
+    return nearby.length ? nearby[0].filePath : null;
 }
 
 function escapeRegex(text) {
     return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-async function findAttributeDefinitionLocation(attributeName) {
-    const javaFile = await findJavaFileByClassName('org.zenframework.z8.compiler.core.IAttribute');
+async function findAttributeDefinitionLocation(attributeName, blFilePath) {
+    const javaFile = await findJavaFileByClassName('org.zenframework.z8.compiler.core.IAttribute', blFilePath);
     if (!javaFile) return null;
 
     try {
@@ -792,37 +677,11 @@ async function findAttributeDefinitionLocation(attributeName) {
     }
 }
 
-async function findIdentifierReferences(identifier, token) {
-    const results = [];
-    const blFiles = await vscode.workspace.findFiles('**/*.bl', '**/node_modules/**');
-    const safe = escapeRegex(identifier);
-    const idRegex = new RegExp(`\\b${safe}\\b`, 'g');
-
-    for (const fileUri of blFiles) {
-        if (token && token.isCancellationRequested) break;
-        try {
-            const content = fs.readFileSync(fileUri.fsPath, 'utf8');
-            const lines = content.split(/\r?\n/);
-            for (let i = 0; i < lines.length; i++) {
-                const line = lines[i];
-                let match;
-                while ((match = idRegex.exec(line)) !== null) {
-                    results.push(new vscode.Location(fileUri, new vscode.Position(i, match.index)));
-                }
-            }
-        } catch (err) {
-            // ignore
-        }
-    }
-
-    return results;
-}
-
 function parseAccessChain(line, wordStart) {
     const before = line.slice(0, wordStart);
     const trimmedLength = before.replace(/\s+$/, '').length;
     if (trimmedLength === 0) return null;
-    const chains = findChainsInLine(before);
+    const chains = findChainsInLine(before, true);
     if (chains.length === 0) return null;
     const match = [...chains].reverse().find(chain => chain.end >= trimmedLength);
     return match ? match.segments : null;
@@ -831,13 +690,16 @@ function parseAccessChain(line, wordStart) {
 function buildContinuationText(lines, lineIndex, wordStart) {
     let i = lineIndex - 1;
     const prefixParts = [];
+    let leadingDot = lines[lineIndex].trimStart().startsWith('.');
 
     while (i >= 0) {
         const line = stripInlineAttributes(lines[i]);
         const trimmed = line.trim();
         if (!trimmed) break;
-        if (!trimmed.endsWith('.')) break;
+        if (!trimmed.endsWith('.') && !leadingDot) break;
+        if (/[;{}]$/.test(trimmed)) break;
         prefixParts.unshift(trimmed);
+        leadingDot = trimmed.startsWith('.');
         i -= 1;
     }
 
@@ -853,35 +715,34 @@ function buildContinuationText(lines, lineIndex, wordStart) {
     return { combined, wordStart: combinedWordStart };
 }
 
-function getContinuationChain(document, lineIndex, wordStart) {
-    const text = sanitizeText(document.getText());
-    const lines = text.split(/\r?\n/);
-    const continuation = buildContinuationText(lines, lineIndex, wordStart);
-    if (!continuation) return null;
-    return parseAccessChain(continuation.combined, continuation.wordStart);
-}
-
 function getMethodSignatureText(lines, startLine) {
     let text = lines[startLine];
     let i = startLine;
     while (i + 1 < lines.length && text.indexOf(')') === -1) {
         i += 1;
-        text += lines[i];
+        text += '\n' + lines[i];
     }
     return text;
 }
 
 function findLocalVariableDefinition(document, position, varName) {
-    const lines = document.getText().split(/\r?\n/);
-    const keywordTypes = new Set(['return', 'if', 'else', 'while', 'for', 'throw', 'try', 'catch', 'auto']);
+    const lines = getCodeLines(document);
+    let skippedDepth = 0;
 
     for (let i = position.line; i >= 0; i--) {
         const line = lines[i];
+        const skippedScope = skippedDepth > 0;
+        const prefix = i === position.line ? line.slice(0, position.character) : line;
+        for (let j = prefix.length - 1; j >= 0; j--) {
+            if (prefix[j] === '}') skippedDepth++;
+            else if (prefix[j] === '{' && skippedDepth > 0) skippedDepth--;
+        }
+        if (skippedDepth > 0) continue;
 
         const methodMatch = line.match(METHOD_DEF_RE);
-        if (methodMatch) {
+        if (!skippedScope && methodMatch && !STATEMENT_TYPES.has(methodMatch[1].trim())) {
             const signature = getMethodSignatureText(lines, i);
-            const paramsMatch = signature.match(/\((.*)\)/);
+            const paramsMatch = signature.match(/\(([\s\S]*)\)/);
             if (paramsMatch) {
                 const params = paramsMatch[1];
                 const paramRe = new RegExp(String.raw`(${TYPE_PATTERN})\s+(\w+)`, 'g');
@@ -890,7 +751,9 @@ function findLocalVariableDefinition(document, position, varName) {
                     const typeName = match[1];
                     const name = match[2];
                     if (name === varName) {
-                        return { line: i, column: line.indexOf(name), typeName };
+                        const offset = signature.indexOf('(') + 1 + match.index + match[0].lastIndexOf(name);
+                        const prefix = signature.slice(0, offset).split('\n');
+                        return { line: i + prefix.length - 1, column: prefix[prefix.length - 1].length, typeName };
                     }
                 }
             }
@@ -900,13 +763,13 @@ function findLocalVariableDefinition(document, position, varName) {
         const varMatch = line.match(new RegExp(String.raw`^\s*(${TYPE_PATTERN})\s+${varName}\s*[=;]`));
         if (varMatch) {
             const typeName = varMatch[1].trim();
-            if (!keywordTypes.has(typeName)) {
-                return { line: i, column: line.indexOf(varName), typeName };
+            if (!STATEMENT_TYPES.has(typeName)) {
+                return { line: i, column: line.indexOf(varName, varMatch[0].lastIndexOf(varName)), typeName };
             }
         }
 
         const forMatch = line.match(new RegExp(String.raw`\bfor\s*\(\s*(${TYPE_PATTERN})\s+${varName}\b`));
-        if (forMatch) {
+        if (forMatch && !skippedScope) {
             return { line: i, column: line.indexOf(varName), typeName: forMatch[1].trim() };
         }
     }
@@ -938,8 +801,10 @@ function resolveIdentifierTypeCandidates(context, document, position, name, inli
 }
 
 function resolveChainTypeCandidates(context, document, position, segments, inlineContext, importContext, forceFirstClass = false) {
+    if (!segments.length) return [];
     let candidates = [];
     const first = segments[0];
+    let start = 1;
 
     if (first.isCall) {
         if (inlineContext && inlineContext.locals) {
@@ -951,7 +816,7 @@ function resolveChainTypeCandidates(context, document, position, segments, inlin
         if (candidates.length === 0) {
             const found = index.findMethodInClassChain(context, first.name);
             if (found) {
-                candidates = index.resolveTypeName(found.owner, found.method.returnType);
+                candidates = (found.method.overloads || [found.method]).flatMap(method => index.resolveTypeName(found.owner, method.returnType));
             }
         }
     } else {
@@ -960,9 +825,20 @@ function resolveChainTypeCandidates(context, document, position, segments, inlin
         } else {
             candidates = resolveIdentifierTypeCandidates(context, document, position, first.name, inlineContext, importContext);
         }
+        if (candidates.length === 0) {
+            for (let length = segments.length; length > 1; length--) {
+                const prefix = segments.slice(0, length);
+                if (prefix.some(segment => segment.isCall || segment.hasIndex)) continue;
+                candidates = index.resolveClassName(importContext || context, prefix.map(segment => segment.name).join('.'));
+                if (candidates.length) {
+                    start = length;
+                    break;
+                }
+            }
+        }
     }
 
-    for (const segment of segments.slice(1)) {
+    for (const segment of segments.slice(start)) {
         const next = [];
         for (const candidate of candidates) {
             if (segment.isCall) {
@@ -975,7 +851,9 @@ function resolveChainTypeCandidates(context, document, position, segments, inlin
                 }
                 const method = index.findMethodInClassChain(candidate, segment.name);
                 if (method) {
-                    next.push(...index.resolveTypeName(method.owner, method.method.returnType));
+                    for (const overload of method.method.overloads || [method.method]) {
+                        next.push(...index.resolveTypeName(method.owner, overload.returnType));
+                    }
                 }
             } else {
                 if (inlineContext && inlineContext.locals && candidate === context) {
@@ -994,8 +872,8 @@ function resolveChainTypeCandidates(context, document, position, segments, inlin
         const seen = new Set();
         const unique = [];
         for (const info of next) {
-            if (!seen.has(info.fullName)) {
-                seen.add(info.fullName);
+            if (!seen.has(info.filePath)) {
+                seen.add(info.filePath);
                 unique.push(info);
             }
         }
@@ -1028,6 +906,10 @@ function locationForMember(info, member) {
     return new vscode.Location(vscode.Uri.file(info.filePath), pos);
 }
 
+function locationsForMethod(info, method) {
+    return (method.overloads || [method]).map(overload => locationForMember(info, overload));
+}
+
 function uniqueLocations(locations) {
     const seen = new Set();
     const result = [];
@@ -1048,8 +930,16 @@ class BlDefinitionProvider {
 
         const line = document.lineAt(position.line).text;
         const isCall = isMethodCallAt(document, wordInfo.range);
-        const cleanLine = stripInlineAttributes(line);
         const wordStart = wordInfo.range.start.character;
+        const codeLines = getCodeLines(document);
+        const cleanLine = stripInlineAttributes(codeLines[position.line]);
+        const nativeLine = /\[(?:native|primary)\b/.test(line) ? sanitizeText(document.getText(), false).split(/\r?\n/)[position.line] : '';
+        const nativeMatch = nativeLine.match(/\[(?:native|primary)\s+"([^"]+)"\]/);
+        if (nativeMatch && line.includes(wordInfo.word)) {
+            const javaFile = await findJavaFileByClassName(nativeMatch[1], document.uri.fsPath);
+            if (javaFile) return new vscode.Location(vscode.Uri.file(javaFile), new vscode.Position(0, 0));
+        }
+        if (codeLines[position.line].slice(wordStart, wordInfo.range.end.character).trim() === '') return null;
 
         const context = updateIndexFromDocument(document);
         const baseContextClass = context || index.getClassByFile(document.uri.fsPath);
@@ -1064,28 +954,21 @@ class BlDefinitionProvider {
                 const member = index.findMemberInClassChain(contextClass, attrName);
                 if (member) return locationForMember(member.owner, member.member);
             }
-            const attrLocation = await findAttributeDefinitionLocation(attrName);
+            const attrLocation = await findAttributeDefinitionLocation(attrName, document.uri.fsPath);
             if (attrLocation) return attrLocation;
             return null;
         }
 
-        const importMatch = line.match(/^\s*import\s+([\w.]+)\s*;/);
+        const importMatch = cleanLine.match(/^\s*import\s+([\w.]+)\s*;/);
         if (importMatch) {
-            const info = index.getClassByFullName(importMatch[1]);
+            const info = index.getClassByFullName(importMatch[1], baseContextClass);
             if (info) return locationForClass(info);
         }
 
-        const nativeMatch = line.match(/\[(?:native|primary)\s+"([^"]+)"\]/);
-        if (nativeMatch && line.includes(wordInfo.word)) {
-            const javaFile = await findJavaFileByClassName(nativeMatch[1]);
-            if (javaFile) {
-                return new vscode.Location(vscode.Uri.file(javaFile), new vscode.Position(0, 0));
-            }
-        }
-
-        const classMatch = line.match(/\b(class|enum)\s+(\w+)/);
-        if (classMatch && classMatch[2] === wordInfo.word) {
-            return new vscode.Location(document.uri, new vscode.Position(position.line, line.indexOf(wordInfo.word)));
+        const classMatch = cleanLine.match(/\b(class|enum)\s+(\w+)/);
+        if (classMatch && classMatch[2] === wordInfo.word &&
+            wordStart === cleanLine.indexOf(classMatch[2], classMatch.index + classMatch[1].length)) {
+            return new vscode.Location(document.uri, wordInfo.range.start);
         }
 
         if (isNewKeywordBefore(line, wordStart)) {
@@ -1094,40 +977,42 @@ class BlDefinitionProvider {
         }
 
         const methodDefMatch = cleanLine.match(METHOD_DEF_RE);
-        if (methodDefMatch && methodDefMatch[2] === wordInfo.word) {
-            const references = await findMethodReferences(wordInfo.word, token);
-            const defLocation = new vscode.Location(
-                document.uri,
-                new vscode.Position(position.line, line.indexOf(wordInfo.word))
-            );
-            return uniqueLocations([defLocation, ...references]);
+        if (methodDefMatch && !STATEMENT_TYPES.has(methodDefMatch[1].trim()) && methodDefMatch[2] === wordInfo.word &&
+            wordStart === cleanLine.lastIndexOf(wordInfo.word, cleanLine.indexOf('('))) {
+            return new vscode.Location(document.uri, wordInfo.range.start);
         }
 
         const fieldDefMatch = cleanLine.match(FIELD_DEF_RE);
-        if (fieldDefMatch && fieldDefMatch[2] === wordInfo.word) {
-            const references = await findIdentifierReferences(wordInfo.word, token);
-            const defLocation = new vscode.Location(
-                document.uri,
-                new vscode.Position(position.line, line.indexOf(wordInfo.word))
-            );
-            return uniqueLocations([defLocation, ...references]);
+        if (fieldDefMatch && !STATEMENT_TYPES.has(fieldDefMatch[1].trim()) && fieldDefMatch[2] === wordInfo.word &&
+            wordStart === fieldDefMatch[0].lastIndexOf(wordInfo.word)) {
+            return new vscode.Location(document.uri, wordInfo.range.start);
         }
 
-        const extendsMatch = line.match(/\bextends\s+([\w.]+)/);
-        if (extendsMatch && extendsMatch[1].includes(wordInfo.word)) {
+        const extendsMatch = cleanLine.match(/\bextends\s+([\w.]+)/);
+        if (extendsMatch && wordStart >= extendsMatch.index + extendsMatch[0].indexOf(extendsMatch[1]) &&
+            wordStart < extendsMatch.index + extendsMatch[0].length) {
             const candidates = index.resolveClassName(contextClass, extendsMatch[1]);
             if (candidates.length > 0) return locationForClass(candidates[0]);
         }
 
-        const chains = findChainsInLine(cleanLine);
-        const chainAtWord = chains.find(chain => wordStart >= chain.start && wordStart <= chain.end);
-        if (chainAtWord) {
-            const forceFirstClass = isNewKeywordBefore(cleanLine, chainAtWord.start);
+        const continuation = buildContinuationText(codeLines, position.line, wordStart);
+        const chainLine = continuation ? continuation.combined : cleanLine;
+        const chainWordStart = continuation ? continuation.wordStart : wordStart;
+        const chains = findChainsInLine(chainLine);
+        const chainAtWord = chains.find(chain => chain.segments.some(segment => chain.start + segment.offset === chainWordStart));
+        const targetIndex = chainAtWord ? chainAtWord.segments.findIndex(segment => chainAtWord.start + segment.offset === chainWordStart) : -1;
+        if (chainAtWord && targetIndex > 0) {
+            const typePrefix = chainAtWord.segments.slice(0, targetIndex + 1);
+            if (typePrefix.every(segment => !segment.isCall && !segment.hasIndex)) {
+                const types = index.resolveClassName(baseContextClass, typePrefix.map(segment => segment.name).join('.'));
+                if (types.length) return types.map(locationForClass);
+            }
+            const forceFirstClass = isNewKeywordBefore(chainLine, chainAtWord.start);
             const owners = resolveChainTypeCandidates(
                 contextClass,
                 document,
                 position,
-                chainAtWord.segments,
+                chainAtWord.segments.slice(0, targetIndex),
                 inlineContext,
                 baseContextClass,
                 forceFirstClass
@@ -1144,7 +1029,7 @@ class BlDefinitionProvider {
                         }
                     }
                     const found = index.findMethodInClassChain(owner, wordInfo.word);
-                    if (found) results.push(locationForMember(found.owner, found.method));
+                    if (found) results.push(...locationsForMethod(found.owner, found.method));
                 } else {
                     if (inlineContext && inlineContext.locals && owner === contextClass) {
                         const localMember = inlineContext.locals.members.get(wordInfo.word);
@@ -1158,59 +1043,8 @@ class BlDefinitionProvider {
                 }
             }
 
-            if (results.length > 0) return uniqueLocations(results);
+            return results.length > 0 ? uniqueLocations(results) : null;
         }
-        const chain = parseAccessChain(line, wordStart);
-        if (chain) {
-            const forceFirstClass = isNewKeywordBefore(line, wordStart);
-            const owners = resolveChainTypeCandidates(contextClass, document, position, chain, inlineContext, baseContextClass, forceFirstClass);
-            const results = [];
-
-            for (const owner of owners) {
-                if (isCall) {
-                    if (inlineContext && inlineContext.locals && owner === contextClass) {
-                        const localMethod = inlineContext.locals.methods.get(wordInfo.word);
-                        if (localMethod) {
-                            results.push(new vscode.Location(document.uri, new vscode.Position(localMethod.line, localMethod.column)));
-                            continue;
-                        }
-                    }
-                    const found = index.findMethodInClassChain(owner, wordInfo.word);
-                    if (found) results.push(locationForMember(found.owner, found.method));
-                } else {
-                    if (inlineContext && inlineContext.locals && owner === contextClass) {
-                        const localMember = inlineContext.locals.members.get(wordInfo.word);
-                        if (localMember) {
-                            results.push(new vscode.Location(document.uri, new vscode.Position(localMember.line, localMember.column)));
-                            continue;
-                        }
-                    }
-                    const found = index.findMemberInClassChain(owner, wordInfo.word);
-                    if (found) results.push(locationForMember(found.owner, found.member));
-                }
-            }
-
-            if (results.length > 0) return uniqueLocations(results);
-        }
-
-        const continuationChain = getContinuationChain(document, position.line, wordStart);
-        if (continuationChain) {
-            const owners = resolveChainTypeCandidates(contextClass, document, position, continuationChain, inlineContext, baseContextClass);
-            const results = [];
-
-            for (const owner of owners) {
-                if (isCall) {
-                    const found = index.findMethodInClassChain(owner, wordInfo.word);
-                    if (found) results.push(locationForMember(found.owner, found.method));
-                } else {
-                    const found = index.findMemberInClassChain(owner, wordInfo.word);
-                    if (found) results.push(locationForMember(found.owner, found.member));
-                }
-            }
-
-            if (results.length > 0) return uniqueLocations(results);
-        }
-
         const local = findLocalVariableDefinition(document, position, wordInfo.word);
         if (local) {
             return new vscode.Location(document.uri, new vscode.Position(local.line, local.column));
@@ -1224,7 +1058,7 @@ class BlDefinitionProvider {
                 }
             }
             const found = index.findMethodInClassChain(contextClass, wordInfo.word);
-            if (found) return locationForMember(found.owner, found.method);
+            if (found) return locationsForMethod(found.owner, found.method);
         } else {
             if (inlineContext && inlineContext.locals) {
                 const localMember = inlineContext.locals.members.get(wordInfo.word);
@@ -1238,9 +1072,9 @@ class BlDefinitionProvider {
 
         const explicitImport = findExplicitImport(baseContextClass, wordInfo.word);
         if (explicitImport) {
-            const info = index.getClassByFullName(explicitImport);
+            const info = index.getClassByFullName(explicitImport, baseContextClass);
             if (info) return locationForClass(info);
-            const javaFile = await findJavaFileByClassName(explicitImport);
+            const javaFile = await findJavaFileByClassName(explicitImport, document.uri.fsPath);
             if (javaFile) {
                 return new vscode.Location(vscode.Uri.file(javaFile), new vscode.Position(0, 0));
             }
@@ -1262,24 +1096,57 @@ class BlReferenceProvider {
         const wordInfo = getWordAtPosition(document, position);
         if (!wordInfo) return [];
 
+        const definitions = new BlDefinitionProvider();
+        const target = await definitions.provideDefinition(document, position, token);
+        const targets = (Array.isArray(target) ? target : target ? [target] : []);
+        if (!targets.length) return [];
+        const locationKey = location => `${location.uri.fsPath}:${location.range.start.line}:${location.range.start.character}`;
+        const targetKeys = new Set(targets.map(locationKey));
+
         const results = [];
         const blFiles = await vscode.workspace.findFiles('**/*.bl', '**/node_modules/**');
+        const openDocuments = new Map(vscode.workspace.textDocuments.filter(doc => doc.languageId === 'bl').map(doc => [doc.uri.fsPath, doc]));
+        openDocuments.set(document.uri.fsPath, document);
+        const fileUris = new Map(blFiles.map(uri => [uri.fsPath, uri]));
+        for (const doc of openDocuments.values()) fileUris.set(doc.uri.fsPath, doc.uri);
 
-        for (const fileUri of blFiles) {
+        for (const fileUri of fileUris.values()) {
             if (token && token.isCancellationRequested) break;
+            let content;
             try {
-                const content = fs.readFileSync(fileUri.fsPath, 'utf8');
-                const lines = content.split(/\r?\n/);
-                for (let i = 0; i < lines.length; i++) {
-                    const line = lines[i];
-                    const regex = new RegExp(`\\b${wordInfo.word}\\b`, 'g');
-                    let match;
-                    while ((match = regex.exec(line)) !== null) {
-                        results.push(new vscode.Location(fileUri, new vscode.Position(i, match.index)));
-                    }
-                }
+                content = openDocuments.has(fileUri.fsPath) ? openDocuments.get(fileUri.fsPath).getText() : fs.readFileSync(fileUri.fsPath, 'utf8');
             } catch (err) {
-                // ignore
+                continue;
+            }
+            const lines = sanitizeText(content).split(/\r?\n/);
+            const rawLines = content.split(/\r?\n/);
+            const candidateDocument = openDocuments.get(fileUri.fsPath) || {
+                uri: fileUri,
+                getText: range => !range ? content : lines[range.start.line].slice(range.start.character, range.end.character),
+                lineAt: line => ({ text: rawLines[line] }),
+                getWordRangeAtPosition(pos) {
+                    const regex = /\w+/g;
+                    let match;
+                    while ((match = regex.exec(lines[pos.line]))) {
+                        if (pos.character >= match.index && pos.character < match.index + match[0].length) {
+                            return new vscode.Range(pos.line, match.index, pos.line, match.index + match[0].length);
+                        }
+                    }
+                    return null;
+                }
+            };
+            for (let i = 0; i < lines.length; i++) {
+                if (token && token.isCancellationRequested) break;
+                const regex = new RegExp(`\\b${escapeRegex(wordInfo.word)}\\b`, 'g');
+                let match;
+                while ((match = regex.exec(lines[i]))) {
+                    if (token && token.isCancellationRequested) break;
+                    const location = new vscode.Location(fileUri, new vscode.Position(i, match.index));
+                    if (!context.includeDeclaration && targetKeys.has(locationKey(location))) continue;
+                    const resolved = await definitions.provideDefinition(candidateDocument, location.range.start, token);
+                    const candidates = Array.isArray(resolved) ? resolved : resolved ? [resolved] : [];
+                    if (candidates.some(candidate => targetKeys.has(locationKey(candidate)))) results.push(location);
+                }
             }
         }
 
@@ -1294,7 +1161,7 @@ class BlCodeLensProvider {
 
         const nativeClass = getNativeAttribute(text);
         if (nativeClass) {
-            const javaFile = await findJavaFileByClassName(nativeClass);
+            const javaFile = await findJavaFileByClassName(nativeClass, document.uri.fsPath);
             if (javaFile) {
                 const match = text.match(/\[(?:native|primary)\s+"([^"]+)"\]/);
                 if (match) {
@@ -1343,7 +1210,7 @@ class BlHoverProvider {
 
         const importMatch = line.match(/^\s*import\s+([\w.]+)\s*;/);
         if (importMatch && line.includes(wordInfo.word)) {
-            const info = index.getClassByFullName(importMatch[1]);
+            const info = index.getClassByFullName(importMatch[1], updateIndexFromDocument(document));
             if (info) {
                 return new vscode.Hover(
                     `**BL Class**: \`${importMatch[1]}\`\n\nCmd+Click для перехода к определению`,
@@ -1559,7 +1426,7 @@ async function goToNativeJava() {
         return;
     }
 
-    const javaFile = await findJavaFileByClassName(nativeClass);
+    const javaFile = await findJavaFileByClassName(nativeClass, document.uri.fsPath);
     if (!javaFile) {
         vscode.window.showWarningMessage(`Java файл не найден: ${nativeClass}`);
         return;
@@ -1762,6 +1629,9 @@ function showDiagnosticsDump(outputChannel) {
 
 async function activate(context) {
     await buildIndex();
+    for (const doc of vscode.workspace.textDocuments) {
+        if (doc.languageId === 'bl') updateIndexFromDocument(doc);
+    }
     const diagnostics = vscode.languages.createDiagnosticCollection('bl');
     debugOutput = vscode.window.createOutputChannel('BL Debug');
     debugOutput.appendLine('BL Language Support activated');
@@ -1805,9 +1675,12 @@ async function activate(context) {
     context.subscriptions.push(diagnostics);
     context.subscriptions.push(debugOutput);
 
-    vscode.workspace.onDidOpenTextDocument(doc => updateDiagnostics(doc, diagnostics));
-    vscode.workspace.onDidChangeTextDocument(event => updateDiagnostics(event.document, diagnostics));
-    vscode.workspace.onDidCloseTextDocument(doc => diagnostics.delete(doc.uri));
+    context.subscriptions.push(vscode.workspace.onDidOpenTextDocument(doc => updateDiagnostics(doc, diagnostics)));
+    context.subscriptions.push(vscode.workspace.onDidChangeTextDocument(event => updateDiagnostics(event.document, diagnostics)));
+    context.subscriptions.push(vscode.workspace.onDidCloseTextDocument(doc => {
+        diagnostics.delete(doc.uri);
+        if (doc.languageId === 'bl') index.updateFile(doc.uri.fsPath);
+    }));
 
     if (vscode.window.activeTextEditor) {
         updateDiagnostics(vscode.window.activeTextEditor.document, diagnostics);

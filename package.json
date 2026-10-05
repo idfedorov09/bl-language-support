@@ -2,7 +2,7 @@
   "name": "bl-language-support",
   "displayName": "Поддержка языка Z8 BL",
   "description": "Поддержка языка Z8 BL для VS Code: навигация и ссылки",
-  "version": "1.0.7",
+  "version": "1.0.9",
   "publisher": "idfedorov09",
   "license": "MIT",
   "icon": "icon.png",
@@ -35,6 +35,10 @@
     "onCommand:bl.dumpDiagnostics"
   ],
   "main": "./extension.js",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "test:corpus": "node test/corpus.js"
+  },
   "contributes": {
     "languages": [
       {

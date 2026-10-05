@@ -1,34 +1,53 @@
 const fs = require('fs');
 const path = require('path');
 
-const TYPE_NAME_RE = /[A-Za-z_][\w.]*(?:\[[^\]]*\])*/;
-const METHOD_DEF_RE = /^\s*(?:(?:static|virtual|final|auto|abstract)\s+)*(?:public|private|protected)?\s*(?:(?:static|virtual|final|auto|abstract)\s+)*([A-Za-z_][\w.]*(?:\[[^\]]*\])*)\s+(\w+)\s*\(/;
-const MEMBER_DEF_RE = /^\s*(?:(?:static|virtual|final|auto|abstract)\s+)*(?:public|private|protected)?\s*(?:(?:static|virtual|final|auto|abstract)\s+)*([A-Za-z_][\w.]*(?:\[[^\]]*\])*)\s+(\w+)\s*(?:=|;|$)/;
-const ATTR_PREFIX_RE = /^\s*(?:\[[^\]]+\]\s*)+/;
+const METHOD_DEF_RE = /^\s*(?:(?:static|virtual|final|auto|abstract)\s+)*(?:public|private|protected)?\s*(?:(?:static|virtual|final|auto|abstract)\s+)*([A-Za-z_][\w.]*\s*(?:\[[^\]]*\]\s*)*)\s+(\w+)\s*\(/;
+const MEMBER_DEF_RE = /^\s*(?:(?:static|virtual|final|auto|abstract)\s+)*(?:public|private|protected)?\s*(?:(?:static|virtual|final|auto|abstract)\s+)*([A-Za-z_][\w.]*\s*(?:\[[^\]]*\]\s*)*)\s+(\w+)\s*(?:=|;|$)/;
 const RECORD_ENTRY_RE = /^\s*(\w+)\s*=/;
 
 function stripInlineAttributes(line) {
+    return line.replace(/^\s*(?:\[[^\]]+\]\s*)+/, prefix => ' '.repeat(prefix.length));
+}
+
+function sanitizeText(text, maskStrings = true) {
     let out = '';
-    let i = 0;
+    let inLine = false;
+    let inBlock = false;
+    let quote = null;
+    let escape = false;
 
-    while (i < line.length) {
-        const ch = line[i];
-        const prev = i > 0 ? line[i - 1] : '';
-
-        if (ch === '[' && (i === 0 || /\s/.test(prev))) {
-            const end = line.indexOf(']', i + 1);
-            if (end !== -1) {
-                i = end + 1;
-                while (i < line.length && /\s/.test(line[i])) i++;
-                continue;
+    for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+        const next = text[i + 1];
+        if (inLine) {
+            if (ch === '\n') inLine = false;
+            out += ch === '\n' || ch === '\r' ? ch : ' ';
+        } else if (inBlock) {
+            if (ch === '*' && next === '/') {
+                inBlock = false;
+                out += '  ';
+                i++;
+            } else {
+                out += ch === '\n' || ch === '\r' ? ch : ' ';
             }
+        } else if (quote) {
+            out += !maskStrings || ch === '\n' || ch === '\r' ? ch : ' ';
+            if (escape) escape = false;
+            else if (ch === '\\') escape = true;
+            else if (ch === quote) quote = null;
+        } else if (ch === '/' && (next === '/' || next === '*')) {
+            inLine = next === '/';
+            inBlock = next === '*';
+            out += '  ';
+            i++;
+        } else if (ch === '"' || ch === "'") {
+            quote = ch;
+            out += maskStrings ? ' ' : ch;
+        } else {
+            out += ch;
         }
-
-        out += ch;
-        i += 1;
     }
-
-    return out.replace(ATTR_PREFIX_RE, '');
+    return out;
 }
 
 function getBlRootFromFilePath(filePath) {
@@ -66,37 +85,6 @@ function normalizeTypeName(typeName) {
     return result;
 }
 
-function stripComments(line, state) {
-    let i = 0;
-    let out = '';
-    while (i < line.length) {
-        if (state.inBlock) {
-            const end = line.indexOf('*/', i);
-            if (end === -1) {
-                return { text: '', inBlock: true };
-            }
-            i = end + 2;
-            state.inBlock = false;
-            continue;
-        }
-        const blockStart = line.indexOf('/*', i);
-        const lineStart = line.indexOf('//', i);
-        if (lineStart !== -1 && (blockStart === -1 || lineStart < blockStart)) {
-            out += line.slice(i, lineStart);
-            return { text: out, inBlock: state.inBlock };
-        }
-        if (blockStart !== -1) {
-            out += line.slice(i, blockStart);
-            i = blockStart + 2;
-            state.inBlock = true;
-            continue;
-        }
-        out += line.slice(i);
-        return { text: out, inBlock: state.inBlock };
-    }
-    return { text: out, inBlock: state.inBlock };
-}
-
 function parseBlContent(filePath, content) {
     const blRoot = getBlRootFromFilePath(filePath);
     if (!blRoot) return null;
@@ -106,6 +94,8 @@ function parseBlContent(filePath, content) {
     const packageName = packagePath === '.' ? '' : packagePath.split(path.sep).join('.');
 
     const lines = content.split(/\r?\n/);
+    const codeLines = sanitizeText(content).split(/\r?\n/);
+    const attributeLines = sanitizeText(content, false).split(/\r?\n/);
     const imports = [];
     const members = new Map();
     const methods = new Map();
@@ -117,22 +107,18 @@ function parseBlContent(filePath, content) {
     let nativeClassName = null;
     let isEnum = false;
 
-    let state = { inBlock: false };
     let braceDepth = 0;
     let recordsDepth = null;
     let pendingRecords = false;
 
     for (let i = 0; i < lines.length; i++) {
-        const rawLine = lines[i];
-        const stripped = stripComments(rawLine, state);
-        state = { inBlock: stripped.inBlock };
-        const line = stripped.text;
+        const line = codeLines[i];
         const candidateLine = stripInlineAttributes(line);
 
         if (!line.trim()) continue;
 
-        const nativeMatch = line.match(/\[(?:native|primary)\s+"([^"]+)"\]/);
-        if (nativeMatch) {
+        const nativeMatch = attributeLines[i].match(/(?:^\s*|\]\s*)\[(?:native|primary)\s+"([^"]+)"\]/);
+        if (nativeMatch && braceDepth === 0) {
             nativeClassName = nativeMatch[1];
         }
 
@@ -148,7 +134,7 @@ function parseBlContent(filePath, content) {
                 className = classMatch[2];
                 extendsName = classMatch[3] || null;
                 classLine = i;
-                classColumn = rawLine.indexOf(className);
+                classColumn = line.indexOf(className, classMatch.index + classMatch[1].length);
                 isEnum = classMatch[1] === 'enum';
             }
         }
@@ -163,30 +149,32 @@ function parseBlContent(filePath, content) {
                     name,
                     typeName: 'guid',
                     line: i,
-                    column: rawLine.indexOf(name)
+                    column: candidateLine.indexOf(name)
                 });
             }
         } else if (inMemberScope) {
             const methodMatch = candidateLine.match(METHOD_DEF_RE);
             if (methodMatch) {
-                const returnType = methodMatch[1];
+                const returnType = methodMatch[1].trim();
                 const name = methodMatch[2];
-                methods.set(name, {
+                const declaration = {
                     name,
                     returnType,
                     line: i,
-                    column: rawLine.indexOf(name)
-                });
+                    column: candidateLine.indexOf(name, methodMatch.index + methodMatch[0].lastIndexOf(name))
+                };
+                const previous = methods.get(name);
+                methods.set(name, { ...declaration, overloads: [...(previous ? previous.overloads : []), declaration] });
             } else {
                 const memberMatch = candidateLine.match(MEMBER_DEF_RE);
                 if (memberMatch) {
-                    const typeName = memberMatch[1];
+                    const typeName = memberMatch[1].trim();
                     const name = memberMatch[2];
                     members.set(name, {
                         name,
                         typeName,
                         line: i,
-                        column: rawLine.indexOf(name)
+                        column: candidateLine.indexOf(name, memberMatch.index + memberMatch[0].lastIndexOf(name))
                     });
                 } else if (isEnum) {
                     const enumLine = candidateLine.replace(/[{}]/g, '').trim();
@@ -201,7 +189,7 @@ function parseBlContent(filePath, content) {
                                 name,
                                 typeName: className,
                                 line: i,
-                                column: rawLine.indexOf(name)
+                                column: candidateLine.indexOf(name)
                             });
                         }
                     }
@@ -294,6 +282,9 @@ class BlIndex {
         const existing = this.fileToClass.get(filePath);
         if (!existing) return;
         this.fileToClass.delete(filePath);
+        const copies = this.classesByFullName.get(existing.fullName);
+        copies.delete(filePath);
+        if (copies.size > 0) return;
         this.classesByFullName.delete(existing.fullName);
 
         const set = this.classesByShortName.get(existing.className);
@@ -305,7 +296,10 @@ class BlIndex {
 
     addClass(info) {
         this.fileToClass.set(info.filePath, info);
-        this.classesByFullName.set(info.fullName, info);
+        if (!this.classesByFullName.has(info.fullName)) {
+            this.classesByFullName.set(info.fullName, new Map());
+        }
+        this.classesByFullName.get(info.fullName).set(info.filePath, info);
         if (!this.classesByShortName.has(info.className)) {
             this.classesByShortName.set(info.className, new Set());
         }
@@ -316,14 +310,33 @@ class BlIndex {
         return this.fileToClass.get(filePath) || null;
     }
 
-    getClassByFullName(fullName) {
-        return this.classesByFullName.get(fullName) || null;
+    getClassByFullName(fullName, context) {
+        const copies = this.classesByFullName.get(fullName);
+        return copies ? this.preferNearbyClasses(context, Array.from(copies.values()))[0] : null;
+    }
+
+    preferNearbyClasses(context, classes) {
+        if (!context || classes.length < 2) return classes;
+        const contextParts = context.moduleRoot.split(path.sep);
+        let best = -1;
+        const nearby = [];
+        for (const info of classes) {
+            const parts = info.moduleRoot.split(path.sep);
+            let shared = 0;
+            while (shared < parts.length && shared < contextParts.length && parts[shared] === contextParts[shared]) shared++;
+            if (shared > best) {
+                best = shared;
+                nearby.length = 0;
+            }
+            if (shared === best) nearby.push(info);
+        }
+        return nearby;
     }
 
     resolveClassName(context, name) {
         if (!name) return [];
         if (name.includes('.')) {
-            const info = this.getClassByFullName(name);
+            const info = this.getClassByFullName(name, context);
             return info ? [info] : [];
         }
 
@@ -332,7 +345,7 @@ class BlIndex {
             for (const imp of context.imports) {
                 if (imp === name || imp.endsWith(`.${name}`)) {
                     explicitImport = imp;
-                    const info = this.getClassByFullName(imp);
+                    const info = this.getClassByFullName(imp, context);
                     if (info) return [info];
                 }
             }
@@ -343,14 +356,14 @@ class BlIndex {
 
             if (context.packageName) {
                 const samePackage = `${context.packageName}.${name}`;
-                const info = this.getClassByFullName(samePackage);
+                const info = this.getClassByFullName(samePackage, context);
                 if (info) return [info];
             }
         }
 
         const candidates = this.classesByShortName.get(name);
         if (!candidates) return [];
-        return Array.from(candidates).map(full => this.getClassByFullName(full)).filter(Boolean);
+        return this.preferNearbyClasses(context, Array.from(candidates).map(full => this.getClassByFullName(full, context)).filter(Boolean));
     }
 
     resolveTypeName(context, typeName) {
@@ -367,7 +380,9 @@ class BlIndex {
 
     findMemberInClassChain(info, name) {
         let current = info;
-        while (current) {
+        const seen = new Set();
+        while (current && !seen.has(current.filePath)) {
+            seen.add(current.filePath);
             const member = current.members.get(name);
             if (member) return { owner: current, member };
             current = this.resolveBaseClass(current);
@@ -377,7 +392,9 @@ class BlIndex {
 
     findMethodInClassChain(info, name) {
         let current = info;
-        while (current) {
+        const seen = new Set();
+        while (current && !seen.has(current.filePath)) {
+            seen.add(current.filePath);
             const method = current.methods.get(name);
             if (method) return { owner: current, method };
             current = this.resolveBaseClass(current);
@@ -391,5 +408,7 @@ module.exports = {
     getBlRootFromFilePath,
     getModuleRootFromBlFile,
     normalizeTypeName,
+    sanitizeText,
+    stripInlineAttributes,
     parseBlContent
 };
