@@ -1,12 +1,75 @@
 const fs = require('fs');
 const path = require('path');
+const { Buffer } = require('buffer');
 
 const METHOD_DEF_RE = /^\s*(?:(?:static|virtual|final|auto|abstract)\s+)*(?:public|private|protected)?\s*(?:(?:static|virtual|final|auto|abstract)\s+)*([A-Za-z_][\w.]*\s*(?:\[[^\]]*\]\s*)*)\s+(\w+)\s*\(/;
 const MEMBER_DEF_RE = /^\s*(?:(?:static|virtual|final|auto|abstract)\s+)*(?:public|private|protected)?\s*(?:(?:static|virtual|final|auto|abstract)\s+)*([A-Za-z_][\w.]*\s*(?:\[[^\]]*\]\s*)*)\s+(\w+)\s*(?:=|;|$)/;
 const RECORD_ENTRY_RE = /^\s*(\w+)\s*=/;
+const DECLARATION_MODIFIERS = new Set(['public', 'private', 'protected', 'static', 'virtual', 'final', 'auto', 'abstract']);
+const WORD_FILTER_BITS = 8192;
+
+function wordHashes(word, hashes = [0, 0]) {
+    let first = 2166136261, second = 5381;
+    for (let i = 0; i < word.length; i++) {
+        const code = word.charCodeAt(i);
+        first = Math.imul(first ^ code, 16777619);
+        second = Math.imul(second, 33) ^ code;
+    }
+    hashes[0] = first >>> 0;
+    hashes[1] = (second | 1) >>> 0;
+    return hashes;
+}
+
+// A fixed-size Bloom filter keeps reference candidates without retaining every
+// word/occurrence. False positives are resolved normally; false negatives are
+// not possible for a word added to the filter.
+function addWord(filter, first, second) {
+    for (let i = 0; i < 4; i++) {
+        const bit = (first + Math.imul(i, second)) & (WORD_FILTER_BITS - 1);
+        filter[bit >>> 5] |= 1 << (bit & 31);
+    }
+}
+
+function mayContainWord(filter, first, second) {
+    for (let i = 0; i < 4; i++) {
+        const bit = (first + Math.imul(i, second)) & (WORD_FILTER_BITS - 1);
+        if (!(filter[bit >>> 5] & (1 << (bit & 31)))) return false;
+    }
+    return true;
+}
 
 function stripInlineAttributes(line) {
-    return line.replace(/^\s*(?:\[[^\]]+\]\s*)+/, prefix => ' '.repeat(prefix.length));
+    if (!line.includes('[')) return line;
+    let result = '';
+    let copied = 0;
+    let i = 0;
+    while (i < line.length) {
+        if (/\s/.test(line[i])) {
+            i++;
+            continue;
+        }
+        if (line[i] === '[') {
+            let depth = 1;
+            let quote = null;
+            const start = i++;
+            for (; i < line.length && depth > 0; i++) {
+                const ch = line[i];
+                if (quote) {
+                    if (ch === '\\') i++;
+                    else if (ch === quote) quote = null;
+                } else if (ch === '"' || ch === "'") quote = ch;
+                else if (ch === '[') depth++;
+                else if (ch === ']') depth--;
+            }
+            result += line.slice(copied, start) + ' '.repeat(i - start);
+            copied = i;
+            continue;
+        }
+        const word = line.slice(i).match(/^\w+/);
+        if (!word || !DECLARATION_MODIFIERS.has(word[0])) break;
+        i += word[0].length;
+    }
+    return copied ? result + line.slice(copied) : line;
 }
 
 function sanitizeText(text, maskStrings = true) {
@@ -85,7 +148,7 @@ function normalizeTypeName(typeName) {
     return result;
 }
 
-function parseBlContent(filePath, content) {
+function parseBlContent(filePath, content, lexical) {
     const blRoot = getBlRootFromFilePath(filePath);
     if (!blRoot) return null;
 
@@ -93,9 +156,9 @@ function parseBlContent(filePath, content) {
     const packagePath = path.dirname(relativePath);
     const packageName = packagePath === '.' ? '' : packagePath.split(path.sep).join('.');
 
-    const lines = content.split(/\r?\n/);
-    const codeLines = sanitizeText(content).split(/\r?\n/);
-    const attributeLines = sanitizeText(content, false).split(/\r?\n/);
+    const codeLines = lexical ? lexical.lines : sanitizeText(content).split(/\r?\n/);
+    const hasNativeAttribute = /\[(?:native|primary)\b/.test(content);
+    const attributeLines = hasNativeAttribute ? sanitizeText(content, false).split(/\r?\n/) : null;
     const imports = [];
     const members = new Map();
     const methods = new Map();
@@ -111,13 +174,13 @@ function parseBlContent(filePath, content) {
     let recordsDepth = null;
     let pendingRecords = false;
 
-    for (let i = 0; i < lines.length; i++) {
+    for (let i = 0; i < codeLines.length; i++) {
         const line = codeLines[i];
         const candidateLine = stripInlineAttributes(line);
 
         if (!line.trim()) continue;
 
-        const nativeMatch = attributeLines[i].match(/(?:^\s*|\]\s*)\[(?:native|primary)\s+"([^"]+)"\]/);
+        const nativeMatch = attributeLines && braceDepth === 0 && attributeLines[i].match(/(?:^\s*|\]\s*)\[(?:native|primary)\s+"([^"]+)"\]/);
         if (nativeMatch && braceDepth === 0) {
             nativeClassName = nativeMatch[1];
         }
@@ -235,6 +298,7 @@ function parseBlContent(filePath, content) {
         classLine,
         classColumn,
         extendsName,
+        isEnum,
         nativeClassName,
         imports,
         members,
@@ -242,20 +306,14 @@ function parseBlContent(filePath, content) {
     };
 }
 
-function parseBlFile(filePath) {
-    try {
-        const content = fs.readFileSync(filePath, 'utf8');
-        return parseBlContent(filePath, content);
-    } catch (err) {
-        return null;
-    }
-}
-
 class BlIndex {
     constructor() {
         this.classesByFullName = new Map();
         this.classesByShortName = new Map();
         this.fileToClass = new Map();
+        this.wordFilters = new Map();
+        this.wordHashCache = new Map();
+        this.revision = 0;
     }
 
     indexFiles(filePaths) {
@@ -264,21 +322,47 @@ class BlIndex {
         }
     }
 
-    updateFromText(filePath, content) {
+    updateFromText(filePath, content, lexical) {
         this.removeFile(filePath);
-        const info = parseBlContent(filePath, content);
+        lexical = lexical || { lines: sanitizeText(content).split(/\r?\n/) };
+        const info = parseBlContent(filePath, content, lexical);
         if (info) this.addClass(info);
+        const filter = new Uint32Array(WORD_FILTER_BITS / 32);
+        const regex = /[A-Za-z_]\w*/g;
+        const words = new Set();
+        for (const line of lexical.lines) {
+            let match;
+            while ((match = regex.exec(line))) words.add(match[0]);
+        }
+        for (const word of words) {
+            let hashes = this.wordHashCache.get(word);
+            if (!hashes) {
+                hashes = wordHashes(word);
+                if (word.length <= 128) {
+                    // Copy a short key so a V8 sliced string cannot retain an
+                    // obsolete source buffer after its file was changed/closed.
+                    this.wordHashCache.set(Buffer.from(word, 'utf8').toString('utf8'), hashes);
+                    if (this.wordHashCache.size > 1024) this.wordHashCache.delete(this.wordHashCache.keys().next().value);
+                }
+            }
+            addWord(filter, hashes[0], hashes[1]);
+        }
+        this.wordFilters.set(filePath, filter);
+        this.revision++;
         return info;
     }
 
     updateFile(filePath) {
-        this.removeFile(filePath);
-        const info = parseBlFile(filePath);
-        if (info) this.addClass(info);
-        return info;
+        try {
+            return this.updateFromText(filePath, fs.readFileSync(filePath, 'utf8'));
+        } catch (err) {
+            this.removeFile(filePath);
+            return null;
+        }
     }
 
     removeFile(filePath) {
+        if (this.wordFilters.delete(filePath)) this.revision++;
         const existing = this.fileToClass.get(filePath);
         if (!existing) return;
         this.fileToClass.delete(filePath);
@@ -308,6 +392,13 @@ class BlIndex {
 
     getClassByFile(filePath) {
         return this.fileToClass.get(filePath) || null;
+    }
+
+    getReferenceCandidates(word) {
+        const [first, second] = wordHashes(word);
+        const files = new Set();
+        for (const [file, filter] of this.wordFilters) if (mayContainWord(filter, first, second)) files.add(file);
+        return files;
     }
 
     getClassByFullName(fullName, context) {
@@ -373,8 +464,11 @@ class BlIndex {
     }
 
     resolveBaseClass(info) {
-        if (!info || !info.extendsName) return null;
-        const resolved = this.resolveClassName(info, info.extendsName);
+        if (!info) return null;
+        const name = info.extendsName || (!info.nativeClassName && !info.isEnum && info.fullName !== 'org.zenframework.z8.lang.Object'
+            ? 'org.zenframework.z8.lang.Object' : null);
+        if (!name) return null;
+        const resolved = this.resolveClassName(info, name);
         return resolved.length > 0 ? resolved[0] : null;
     }
 

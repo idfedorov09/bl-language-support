@@ -2,7 +2,7 @@
   "name": "bl-language-support",
   "displayName": "Поддержка языка Z8 BL",
   "description": "Поддержка языка Z8 BL для VS Code: навигация и ссылки",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "publisher": "idfedorov09",
   "license": "MIT",
   "icon": "icon.png",
@@ -40,6 +40,64 @@
     "test:corpus": "node test/corpus.js"
   },
   "contributes": {
+    "configuration": {
+      "title": "Поддержка языка Z8 BL",
+      "properties": {
+        "bl.diagnostics.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "Проверять BL-код и показывать диагностику. Навигация работает независимо от этой настройки."
+        },
+        "bl.diagnostics.mode": {
+          "type": "string",
+          "enum": [
+            "onType",
+            "onSave"
+          ],
+          "enumDescriptions": [
+            "Проверять после паузы при вводе, при открытии и сохранении.",
+            "Проверять только при открытии и сохранении."
+          ],
+          "default": "onType",
+          "scope": "resource",
+          "description": "Когда запускать диагностику BL."
+        },
+        "bl.diagnostics.delay": {
+          "type": "integer",
+          "default": 300,
+          "minimum": 0,
+          "maximum": 5000,
+          "scope": "resource",
+          "description": "Задержка диагностики после последнего изменения, в миллисекундах. Используется в режиме onType."
+        },
+        "bl.index.exclude": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "**/node_modules/**",
+            "**/.git/**",
+            "**/build/**"
+          ],
+          "scope": "window",
+          "description": "Glob-паттерны исключений фоновой индексации BL. Открытые файлы разбираются по требованию; не исключайте необходимые BL-зависимости."
+        },
+        "bl.codeLens.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "Показывать над объявлениями BL ссылки на native и скомпилированный Java."
+        },
+        "bl.debug.trace": {
+          "type": "boolean",
+          "default": false,
+          "scope": "resource",
+          "description": "Выводить дополнительные трассы диагностики в BL Debug. Команды отладки работают и без этой настройки."
+        }
+      }
+    },
     "languages": [
       {
         "id": "bl",

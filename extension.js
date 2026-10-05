@@ -9,40 +9,167 @@ const {
     sanitizeText,
     stripInlineAttributes
 } = require('./blIndex');
+const { DocumentAnalysis, TYPE_PATTERN, METHOD_DEF_RE, STATEMENT_TYPES } = require('./documentAnalysis');
 
 const index = new BlIndex();
 let debugOutput = null;
-const documentIndex = new WeakMap();
-const lexicalDocuments = new WeakMap();
-
-const TYPE_PATTERN = String.raw`[A-Za-z_][\w.]*\s*(?:\[[^\]]*\])*`;
-const METHOD_DEF_RE = /^\s*(?:(?:static|virtual|final|auto|abstract)\s+)*(?:public|private|protected)?\s*(?:(?:static|virtual|final|auto|abstract)\s+)*([A-Za-z_][\w.]*\s*(?:\[[^\]]*\])*)\s+(\w+)\s*\(/;
+let documentIndex = new WeakMap();
+let lexicalDocuments = new WeakMap();
 const FIELD_DEF_RE = /^\s*(?:(?:static|virtual|final|auto|abstract)\s+)*(?:public|private|protected)?\s*(?:(?:static|virtual|final|auto|abstract)\s+)*([A-Za-z_][\w.]*\s*(?:\[[^\]]*\])*)\s+(\w+)\s*[=;]/;
 const MODIFIER_RE = /\b(public|private|protected|static|final|virtual|abstract|auto)\b/;
 const MODIFIERS_RE = /\b(public|private|protected|static|final|virtual|abstract|auto)\b/g;
-const STATEMENT_TYPES = new Set(['return', 'if', 'else', 'while', 'for', 'throw', 'try', 'catch', 'new', 'auto']);
+const javaFiles = new Map();
+const attributeDefinitions = new Map();
+const CACHE_LIMIT = 128;
+let disposed = false;
+let indexBuild = Promise.resolve();
+let buildGeneration = 0;
+let workspaceFiles = new Set();
+let discoveryTimer = null;
+let javaLensTimer = null;
+const pendingReads = new Map();
+const dirtyDocuments = new Set();
+const diagnosticTimers = new Map();
+let diagnosticsCollection = null;
+
+function configuration(document) {
+    return vscode.workspace.getConfiguration('bl', document && document.uri);
+}
+
+function boundedCache(cache, key, create) {
+    if (cache.has(key)) {
+        const value = cache.get(key);
+        cache.delete(key);
+        cache.set(key, value);
+        return value;
+    }
+    let value = create();
+    if (value && typeof value.then === 'function') value = value.catch(error => {
+        if (cache.get(key) === value) cache.delete(key);
+        throw error;
+    });
+    cache.set(key, value);
+    if (cache.size > CACHE_LIMIT) cache.delete(cache.keys().next().value);
+    return value;
+}
+
+function invalidateJava() {
+    javaFiles.clear();
+    attributeDefinitions.clear();
+}
+
+function yieldToHost() {
+    return new Promise(resolve => setImmediate(resolve));
+}
+
+function getAnalysis(document) {
+    const cached = lexicalDocuments.get(document);
+    if (cached && typeof document.version === 'number' && cached.version === document.version) return cached.analysis;
+    const text = document.getText();
+    if (cached && cached.analysis.text === text) {
+        cached.version = document.version;
+        return cached.analysis;
+    }
+    const analysis = new DocumentAnalysis(text);
+    lexicalDocuments.set(document, { version: document.version, analysis });
+    return analysis;
+}
 
 async function buildIndex() {
-    const blFiles = await vscode.workspace.findFiles('**/*.bl', '**/node_modules/**');
-    index.indexFiles(blFiles.map(f => f.fsPath));
+    const generation = ++buildGeneration;
+    const excludes = configuration().get('index.exclude', ['**/node_modules/**', '**/.git/**', '**/build/**']);
+    const exclude = excludes.length > 1 ? `{${excludes.join(',')}}` : excludes[0] || null;
+    const blFiles = await vscode.workspace.findFiles('**/*.bl', exclude);
+    if (disposed || generation !== buildGeneration) return;
+    const included = new Set(blFiles.map(uri => uri.fsPath));
+    workspaceFiles = included;
+    for (const file of index.wordFilters.keys()) if (!included.has(file)) {
+        pendingReads.delete(file);
+        index.removeFile(file);
+    }
+    for (const uri of blFiles) {
+        if (disposed || generation !== buildGeneration) return;
+        if (!index.wordFilters.has(uri.fsPath)) await refreshFile(uri);
+    }
+    for (const doc of vscode.workspace.textDocuments) if (doc.languageId === 'bl') updateIndexFromDocument(doc);
+}
+
+function rebuildIndex() {
+    indexBuild = buildIndex().catch(error => {
+        if (disposed) return;
+        if (debugOutput) debugOutput.appendLine(`Index error: ${error.message}`);
+        vscode.window.showWarningMessage(`Не удалось обновить индекс BL: ${error.message}`);
+    });
+    return indexBuild;
+}
+
+function refreshFile(uri) {
+    const findOpen = () => vscode.workspace.textDocuments.find(doc => !doc.isClosed && doc.languageId === 'bl' && doc.uri.fsPath === uri.fsPath);
+    const open = findOpen();
+    if (open) { updateIndexFromDocument(open); return Promise.resolve(); }
+    const request = {};
+    pendingReads.set(uri.fsPath, request);
+    request.promise = (async () => {
+        try {
+            const text = await fs.promises.readFile(uri.fsPath, 'utf8');
+            if (disposed || pendingReads.get(uri.fsPath) !== request || !workspaceFiles.has(uri.fsPath)) return;
+            const currentOpen = findOpen();
+            if (currentOpen) updateIndexFromDocument(currentOpen);
+            else index.updateFromText(uri.fsPath, text);
+            if (diagnosticsCollection) for (const doc of vscode.workspace.textDocuments) scheduleDiagnostics(doc, diagnosticsCollection);
+        } catch (error) {
+            if (disposed || pendingReads.get(uri.fsPath) !== request) return;
+            if (error.code === 'ENOENT') index.removeFile(uri.fsPath);
+            else {
+                if (debugOutput) debugOutput.appendLine(`Read error: ${uri.fsPath}: ${error.message}`);
+                vscode.window.showWarningMessage(`Не удалось прочитать BL-файл: ${uri.fsPath}. Подробности в BL Debug.`);
+            }
+        } finally {
+            if (pendingReads.get(uri.fsPath) === request) pendingReads.delete(uri.fsPath);
+        }
+    })();
+    return request.promise;
+}
+
+function scheduleDiscovery() {
+    clearTimeout(discoveryTimer);
+    discoveryTimer = setTimeout(() => { discoveryTimer = null; rebuildIndex(); }, 100);
+}
+
+async function ensureIndexReady(token) {
+    while (!disposed && !(token && token.isCancellationRequested)) {
+        if (discoveryTimer) {
+            clearTimeout(discoveryTimer);
+            discoveryTimer = null;
+            rebuildIndex();
+        }
+        const build = indexBuild;
+        await build;
+        await Promise.all(Array.from(pendingReads.values(), request => request.promise));
+        if (build === indexBuild && !pendingReads.size && !discoveryTimer) {
+            // Keep navigation current even when diagnostics are delayed/off.
+            // Edits only enqueue documents; parsing is deferred until needed.
+            for (const document of dirtyDocuments) {
+                if (!document.isClosed && document.languageId === 'bl') updateIndexFromDocument(document);
+                else dirtyDocuments.delete(document);
+            }
+            return;
+        }
+    }
 }
 
 function updateIndexFromDocument(document) {
-    const text = document.getText();
+    const analysis = getAnalysis(document);
     const cached = documentIndex.get(document);
-    if (cached && cached.text === text && index.getClassByFile(document.uri.fsPath) === cached.info) return cached.info;
-    const info = index.updateFromText(document.uri.fsPath, text);
-    documentIndex.set(document, { text, info });
+    dirtyDocuments.delete(document);
+    if (cached && cached.analysis === analysis && index.getClassByFile(document.uri.fsPath) === cached.info) return cached.info;
+    const info = index.updateFromText(document.uri.fsPath, analysis.text, analysis);
+    documentIndex.set(document, { analysis, info });
     return info;
 }
 
 function getCodeLines(document) {
-    const text = document.getText();
-    const cached = lexicalDocuments.get(document);
-    if (cached && cached.text === text) return cached.lines;
-    const lines = sanitizeText(text).split(/\r?\n/);
-    lexicalDocuments.set(document, { text, lines });
-    return lines;
+    return getAnalysis(document).lines;
 }
 
 function parseInlineClassType(line) {
@@ -68,7 +195,10 @@ function findExplicitImport(contextClass, name) {
 
 function getInlineContextMap(document, baseContext) {
     if (!document || !baseContext) return null;
-    const lines = getCodeLines(document);
+    const analysis = getAnalysis(document);
+    const cached = analysis.inlineContext;
+    if (cached && cached.baseContext === baseContext && cached.revision === index.revision) return cached.map;
+    const lines = analysis.cleanLines;
     const map = new Array(lines.length).fill(null);
     const inlineStack = [];
     let braceDepth = 0;
@@ -76,7 +206,7 @@ function getInlineContextMap(document, baseContext) {
 
     for (let i = 0; i < lines.length; i++) {
         const rawLine = lines[i];
-        const cleanLine = stripInlineAttributes(rawLine);
+        const cleanLine = rawLine;
         const inlineType = parseInlineClassType(cleanLine);
         if (inlineType) {
             if (cleanLine.includes('{')) {
@@ -129,15 +259,20 @@ function getInlineContextMap(document, baseContext) {
         map[i] = inlineStack.length > 0 ? inlineStack[inlineStack.length - 1] : null;
     }
 
+    analysis.inlineContext = { map, baseContext, revision: index.revision };
     return map;
 }
 
 function isIdentifierStart(ch) {
-    return /[A-Za-z_]/.test(ch);
+    if (!ch) return false;
+    const code = ch.charCodeAt(0);
+    return code === 95 || code >= 65 && code <= 90 || code >= 97 && code <= 122;
 }
 
 function isIdentifierChar(ch) {
-    return /[A-Za-z0-9_]/.test(ch);
+    if (!ch) return false;
+    const code = ch.charCodeAt(0);
+    return code === 95 || code >= 48 && code <= 57 || code >= 65 && code <= 90 || code >= 97 && code <= 122;
 }
 
 function skipSpaces(text, index) {
@@ -206,8 +341,10 @@ function parseChainAt(text, startIndex, allowSingle = false) {
 
 function findChainsInLine(text, allowSingle = false) {
     const chains = [];
-    for (let i = 0; i < text.length; i++) {
-        if (!isIdentifierStart(text[i])) continue;
+    const identifiers = /[A-Za-z_]\w*/g;
+    let match;
+    while ((match = identifiers.exec(text))) {
+        const i = match.index;
         const prev = i > 0 ? text[i - 1] : '';
         if (isIdentifierChar(prev) || prev === '.') continue;
         const chain = parseChainAt(text, i, allowSingle);
@@ -241,7 +378,7 @@ function resolveTypeNameWithMeta(context, typeName, importContext) {
     }));
 }
 
-function resolveIdentifierTypeCandidatesWithMeta(context, document, position, name, inlineContext, importContext) {
+function resolveIdentifierTypeCandidatesWithMeta(context, document, position, name, inlineContext, importContext, isCall = false) {
     if (!context || !name) return [];
 
     if (name === 'this') {
@@ -253,7 +390,7 @@ function resolveIdentifierTypeCandidatesWithMeta(context, document, position, na
     }
 
     if (name === 'super') {
-        const base = index.resolveBaseClass(context);
+        const base = inlineContext ? inlineContext.info : index.resolveBaseClass(context);
         return base ? [{
             info: base,
             isArrayLike: false,
@@ -261,11 +398,15 @@ function resolveIdentifierTypeCandidatesWithMeta(context, document, position, na
         }] : [];
     }
 
+    if (isCall) {
+        const inlineMethod = inlineContext && inlineContext.locals.methods.get(name);
+        if (inlineMethod) return resolveTypeNameWithMeta(context, inlineMethod.returnType, importContext);
+        const method = index.findMethodInClassChain(context, name);
+        return method ? (method.method.overloads || [method.method]).flatMap(overload => resolveTypeNameWithMeta(method.owner, overload.returnType)) : [];
+    }
+
     const local = findLocalVariableDefinition(document, position, name);
     if (local) return resolveTypeNameWithMeta(context, local.typeName, importContext);
-
-    const member = index.findMemberInClassChain(context, name);
-    if (member) return resolveTypeNameWithMeta(member.owner, member.member.typeName);
 
     if (inlineContext && inlineContext.locals) {
         if (inlineContext.locals.members.has(name)) {
@@ -273,6 +414,9 @@ function resolveIdentifierTypeCandidatesWithMeta(context, document, position, na
             return resolveTypeNameWithMeta(context, localMember.typeName, importContext);
         }
     }
+
+    const member = index.findMemberInClassChain(context, name);
+    if (member) return resolveTypeNameWithMeta(member.owner, member.member.typeName);
 
     return index.resolveClassName(importContext || context, name).map(info => ({
         info,
@@ -291,14 +435,15 @@ function resolveIdentifierTypeName(context, document, position, name) {
 }
 
 function collectDiagnostics(document, contextClass) {
-    const lines = getCodeLines(document);
+    const lines = getAnalysis(document).cleanLines;
     const diagnostics = [];
     const stack = [];
     const inlineContextMap = getInlineContextMap(document, contextClass);
+    const trace = configuration(document).get('debug.trace', false);
 
     for (let line = 0; line < lines.length; line++) {
         const lineText = lines[line];
-        const cleanLine = stripInlineAttributes(lineText);
+        const cleanLine = lineText;
         const inlineContext = inlineContextMap && inlineContextMap[line] ? inlineContextMap[line] : null;
         const effectiveContext = inlineContext ? inlineContext.info : contextClass;
 
@@ -338,7 +483,7 @@ function collectDiagnostics(document, contextClass) {
             let chains = [];
             if (!trimmed.startsWith('import ')) {
                 chains = findChainsInLine(cleanLine);
-                if (debugOutput && cleanLine.includes('documents[i].getDocumentId')) {
+                if (trace && debugOutput && cleanLine.includes('documents[i].getDocumentId')) {
                     debugOutput.appendLine('Line Trace: documents[i].getDocumentId');
                     debugOutput.appendLine(`Line: ${line + 1}`);
                     debugOutput.appendLine(`CleanLine: ${cleanLine.trim()}`);
@@ -351,7 +496,7 @@ function collectDiagnostics(document, contextClass) {
                     const forceClass = isNewKeywordBefore(cleanLine, chain.start);
                     let candidates = forceClass
                         ? resolveTypeNameWithMeta(effectiveContext, first.name, contextClass)
-                        : resolveIdentifierTypeCandidatesWithMeta(effectiveContext, document, pos, first.name, inlineContext, contextClass);
+                        : resolveIdentifierTypeCandidatesWithMeta(effectiveContext, document, pos, first.name, inlineContext, contextClass, first.isCall);
                     if (candidates.length === 0 && inlineContext && inlineContext.locals) {
                         if (first.isCall) {
                             const localMethod = inlineContext.locals.methods.get(first.name);
@@ -395,7 +540,7 @@ function collectDiagnostics(document, contextClass) {
                                 if (isArrayLike) hasArrayLike = true;
 
                                 if (segment.isCall) {
-                                    if (inlineContext && inlineContext.locals && info === effectiveContext) {
+                                    if (first.name !== 'super' && inlineContext && inlineContext.locals && info === effectiveContext) {
                                         const localMethod = inlineContext.locals.methods.get(segment.name);
                                         if (localMethod) {
                                             foundAny = true;
@@ -406,10 +551,10 @@ function collectDiagnostics(document, contextClass) {
                                     const method = index.findMethodInClassChain(info, segment.name);
                                     if (method) {
                                         foundAny = true;
-                                        next.push(...resolveTypeNameWithMeta(method.owner, method.method.returnType));
+                                        for (const overload of method.method.overloads || [method.method]) next.push(...resolveTypeNameWithMeta(method.owner, overload.returnType));
                                     }
                                 } else {
-                                    if (inlineContext && inlineContext.locals && info === effectiveContext) {
+                                    if (first.name !== 'super' && inlineContext && inlineContext.locals && info === effectiveContext) {
                                         const localMember = inlineContext.locals.members.get(segment.name);
                                         if (localMember) {
                                             foundAny = true;
@@ -450,7 +595,7 @@ function collectDiagnostics(document, contextClass) {
                             diag.source = 'BL';
                             diag.code = 'chain';
                             diagnostics.push(diag);
-                            if (debugOutput && segment.name === 'getDocumentId' && cleanLine.includes('documents[i].getDocumentId')) {
+                            if (trace && debugOutput && segment.name === 'getDocumentId' && cleanLine.includes('documents[i].getDocumentId')) {
                                 debugOutput.appendLine('Diagnostic: Unknown method getDocumentId');
                                 debugOutput.appendLine(`Line: ${line + 1}`);
                                 debugOutput.appendLine(`LineText: ${cleanLine.trim()}`);
@@ -483,7 +628,7 @@ function collectDiagnostics(document, contextClass) {
                 if (['if', 'for', 'while', 'switch', 'catch', 'return', 'new'].includes(name)) continue;
                 if (cleanLine[nameIndex - 1] === '.') continue;
                 const inChain = chains.some(chain => nameIndex >= chain.start && nameIndex <= chain.end);
-                if (debugOutput && cleanLine.includes('documents[i].getDocumentId')) {
+                if (trace && debugOutput && cleanLine.includes('documents[i].getDocumentId')) {
                     debugOutput.appendLine(`CallScan: ${name} at ${nameIndex} inChain=${inChain}`);
                 }
                 if (inChain) continue;
@@ -513,13 +658,13 @@ function collectDiagnostics(document, contextClass) {
                     diag.source = 'BL';
                     diag.code = 'call';
                     diagnostics.push(diag);
-                    if (debugOutput && name === 'access' && cleanLine.includes('addHaving(access())')) {
+                    if (trace && debugOutput && name === 'access' && cleanLine.includes('addHaving(access())')) {
                         debugOutput.appendLine('Diagnostic: Unknown method access');
                         debugOutput.appendLine(`Line: ${line + 1}`);
                         debugOutput.appendLine(`BaseContext: ${contextClass ? contextClass.fullName : '(none)'}`);
                         debugOutput.appendLine(`EffectiveContext: ${effectiveContext ? effectiveContext.fullName : '(none)'}`);
                     }
-                    if (debugOutput && name === 'getDocumentId' && cleanLine.includes('documents[i].getDocumentId')) {
+                    if (trace && debugOutput && name === 'getDocumentId' && cleanLine.includes('documents[i].getDocumentId')) {
                         debugOutput.appendLine('Diagnostic: Unknown method getDocumentId (call pass)');
                         debugOutput.appendLine(`Line: ${line + 1}`);
                         debugOutput.appendLine(`LineText: ${cleanLine.trim()}`);
@@ -528,7 +673,7 @@ function collectDiagnostics(document, contextClass) {
                 }
             }
 
-            if (debugOutput && cleanLine.includes('documents[i].getDocumentId')) {
+            if (trace && debugOutput && cleanLine.includes('documents[i].getDocumentId')) {
                 const lineDiagnostics = diagnostics.filter(diag => diag.range.start.line === line);
                 debugOutput.appendLine(`Line Diagnostics (${line + 1}): ${lineDiagnostics.map(d => d.message).join(' | ') || '(none)'}`);
             }
@@ -549,8 +694,33 @@ function collectDiagnostics(document, contextClass) {
 
 function updateDiagnostics(document, collection) {
     if (!document || document.languageId !== 'bl') return;
+    cancelDiagnostics(document);
+    if (disposed || document.isClosed || !configuration(document).get('diagnostics.enabled', true)) {
+        collection.delete(document.uri);
+        return;
+    }
     const context = updateIndexFromDocument(document);
     collection.set(document.uri, collectDiagnostics(document, context));
+}
+
+function cancelDiagnostics(document) {
+    const pending = diagnosticTimers.get(document.uri.fsPath);
+    if (pending) clearTimeout(pending.timer);
+    diagnosticTimers.delete(document.uri.fsPath);
+}
+
+function scheduleDiagnostics(document, collection) {
+    if (!document || document.languageId !== 'bl') return;
+    cancelDiagnostics(document);
+    const config = configuration(document);
+    if (!config.get('diagnostics.enabled', true)) { collection.delete(document.uri); return; }
+    if (disposed || document.isClosed || config.get('diagnostics.mode', 'onType') !== 'onType') return;
+    const version = document.version;
+    const timer = setTimeout(() => {
+        diagnosticTimers.delete(document.uri.fsPath);
+        if (!disposed && !document.isClosed && document.version === version) updateDiagnostics(document, collection);
+    }, config.get('diagnostics.delay', 300));
+    diagnosticTimers.set(document.uri.fsPath, { timer, document });
 }
 
 function getWordAtPosition(document, position) {
@@ -587,14 +757,17 @@ function isMethodCallAt(document, wordRange) {
 }
 
 function isInRecordsBlock(document, targetLine) {
-    const lines = getCodeLines(document);
+    const analysis = getAnalysis(document);
+    if (analysis.records) return analysis.records[targetLine];
+    const lines = analysis.cleanLines;
+    const records = [];
     let braceDepth = 0;
     let recordsDepth = null;
     let pendingRecords = false;
 
-    for (let i = 0; i <= targetLine && i < lines.length; i++) {
+    for (let i = 0; i < lines.length; i++) {
         const rawLine = lines[i];
-        const line = stripInlineAttributes(rawLine);
+        const line = rawLine;
 
         if (braceDepth === 1 && /\brecords\b/.test(line)) {
             if (line.includes('{')) {
@@ -616,9 +789,11 @@ function isInRecordsBlock(document, targetLine) {
         if (recordsDepth !== null && braceDepth < recordsDepth) {
             recordsDepth = null;
         }
+        records.push(recordsDepth !== null);
     }
 
-    return recordsDepth !== null;
+    analysis.records = records;
+    return records[targetLine];
 }
 
 function getNativeAttribute(text) {
@@ -640,10 +815,15 @@ function findCompiledJavaFile(blFilePath) {
 
 async function findJavaFileByClassName(className, blFilePath) {
     const rel = className.replace(/\./g, '/') + '.java';
-    const files = await vscode.workspace.findFiles(`**/src/main/java/${rel}`, '**/node_modules/**');
-    const alt = await vscode.workspace.findFiles(`**/src/java/${rel}`, '**/node_modules/**');
+    const files = await boundedCache(javaFiles, className, async () => {
+        const [main, alt] = await Promise.all([
+            vscode.workspace.findFiles(`**/src/main/java/${rel}`, '**/node_modules/**'),
+            vscode.workspace.findFiles(`**/src/java/${rel}`, '**/node_modules/**')
+        ]);
+        return [...main, ...alt];
+    });
     const context = blFilePath ? { moduleRoot: getModuleRootFromBlFile(blFilePath) || path.dirname(blFilePath) } : null;
-    const nearby = index.preferNearbyClasses(context, [...files, ...alt].map(file => ({ filePath: file.fsPath, moduleRoot: path.dirname(file.fsPath) })));
+    const nearby = index.preferNearbyClasses(context, files.map(file => ({ filePath: file.fsPath, moduleRoot: path.dirname(file.fsPath) })));
     return nearby.length ? nearby[0].filePath : null;
 }
 
@@ -656,22 +836,20 @@ async function findAttributeDefinitionLocation(attributeName, blFilePath) {
     if (!javaFile) return null;
 
     try {
-        const content = fs.readFileSync(javaFile, 'utf8');
-        const lines = content.split(/\r?\n/);
-        const attrRegex = new RegExp(`\\bString\\s+(\\w+)\\s*=\\s*\"${escapeRegex(attributeName)}\"`);
-
-        for (let i = 0; i < lines.length; i++) {
-            const line = lines[i];
-            const match = line.match(attrRegex);
-            if (match) {
-                const name = match[1];
-                const column = line.indexOf(name);
-                const pos = new vscode.Position(i, Math.max(0, column));
-                return new vscode.Location(vscode.Uri.file(javaFile), pos);
+        const definitions = await boundedCache(attributeDefinitions, javaFile, async () => {
+            const lines = (await fs.promises.readFile(javaFile, 'utf8')).split(/\r?\n/);
+            const definitions = new Map();
+            for (let line = 0; line < lines.length; line++) {
+                const regex = /\bString\s+(\w+)\s*=\s*"([^"]+)"/g;
+                let match;
+                while ((match = regex.exec(lines[line]))) {
+                    if (!definitions.has(match[2])) definitions.set(match[2], new vscode.Location(
+                        vscode.Uri.file(javaFile), new vscode.Position(line, lines[line].indexOf(match[1], match.index))));
+                }
             }
-        }
-
-        return new vscode.Location(vscode.Uri.file(javaFile), new vscode.Position(0, 0));
+            return definitions;
+        });
+        return definitions.get(attributeName) || new vscode.Location(vscode.Uri.file(javaFile), new vscode.Position(0, 0));
     } catch (err) {
         return null;
     }
@@ -715,66 +893,8 @@ function buildContinuationText(lines, lineIndex, wordStart) {
     return { combined, wordStart: combinedWordStart };
 }
 
-function getMethodSignatureText(lines, startLine) {
-    let text = lines[startLine];
-    let i = startLine;
-    while (i + 1 < lines.length && text.indexOf(')') === -1) {
-        i += 1;
-        text += '\n' + lines[i];
-    }
-    return text;
-}
-
 function findLocalVariableDefinition(document, position, varName) {
-    const lines = getCodeLines(document);
-    let skippedDepth = 0;
-
-    for (let i = position.line; i >= 0; i--) {
-        const line = lines[i];
-        const skippedScope = skippedDepth > 0;
-        const prefix = i === position.line ? line.slice(0, position.character) : line;
-        for (let j = prefix.length - 1; j >= 0; j--) {
-            if (prefix[j] === '}') skippedDepth++;
-            else if (prefix[j] === '{' && skippedDepth > 0) skippedDepth--;
-        }
-        if (skippedDepth > 0) continue;
-
-        const methodMatch = line.match(METHOD_DEF_RE);
-        if (!skippedScope && methodMatch && !STATEMENT_TYPES.has(methodMatch[1].trim())) {
-            const signature = getMethodSignatureText(lines, i);
-            const paramsMatch = signature.match(/\(([\s\S]*)\)/);
-            if (paramsMatch) {
-                const params = paramsMatch[1];
-                const paramRe = new RegExp(String.raw`(${TYPE_PATTERN})\s+(\w+)`, 'g');
-                let match;
-                while ((match = paramRe.exec(params)) !== null) {
-                    const typeName = match[1];
-                    const name = match[2];
-                    if (name === varName) {
-                        const offset = signature.indexOf('(') + 1 + match.index + match[0].lastIndexOf(name);
-                        const prefix = signature.slice(0, offset).split('\n');
-                        return { line: i + prefix.length - 1, column: prefix[prefix.length - 1].length, typeName };
-                    }
-                }
-            }
-            break;
-        }
-
-        const varMatch = line.match(new RegExp(String.raw`^\s*(${TYPE_PATTERN})\s+${varName}\s*[=;]`));
-        if (varMatch) {
-            const typeName = varMatch[1].trim();
-            if (!STATEMENT_TYPES.has(typeName)) {
-                return { line: i, column: line.indexOf(varName, varMatch[0].lastIndexOf(varName)), typeName };
-            }
-        }
-
-        const forMatch = line.match(new RegExp(String.raw`\bfor\s*\(\s*(${TYPE_PATTERN})\s+${varName}\b`));
-        if (forMatch && !skippedScope) {
-            return { line: i, column: line.indexOf(varName), typeName: forMatch[1].trim() };
-        }
-    }
-
-    return null;
+    return getAnalysis(document).findLocal(position, varName);
 }
 
 function resolveIdentifierTypeCandidates(context, document, position, name, inlineContext, importContext) {
@@ -782,7 +902,7 @@ function resolveIdentifierTypeCandidates(context, document, position, name, inli
 
     if (name === 'this') return [context];
     if (name === 'super') {
-        const base = index.resolveBaseClass(context);
+        const base = inlineContext ? inlineContext.info : index.resolveBaseClass(context);
         return base ? [base] : [];
     }
 
@@ -842,7 +962,7 @@ function resolveChainTypeCandidates(context, document, position, segments, inlin
         const next = [];
         for (const candidate of candidates) {
             if (segment.isCall) {
-                if (inlineContext && inlineContext.locals && candidate === context) {
+                if (first.name !== 'super' && inlineContext && inlineContext.locals && candidate === context) {
                     const localMethod = inlineContext.locals.methods.get(segment.name);
                     if (localMethod) {
                         next.push(...index.resolveTypeName(context, localMethod.returnType));
@@ -856,7 +976,7 @@ function resolveChainTypeCandidates(context, document, position, segments, inlin
                     }
                 }
             } else {
-                if (inlineContext && inlineContext.locals && candidate === context) {
+                if (first.name !== 'super' && inlineContext && inlineContext.locals && candidate === context) {
                     const localMember = inlineContext.locals.members.get(segment.name);
                     if (localMember) {
                         next.push(...index.resolveTypeName(context, localMember.typeName));
@@ -925,6 +1045,9 @@ function uniqueLocations(locations) {
 
 class BlDefinitionProvider {
     async provideDefinition(document, position, token) {
+        if (token && token.isCancellationRequested) return null;
+        await ensureIndexReady(token);
+        if (token && token.isCancellationRequested) return null;
         const wordInfo = getWordAtPosition(document, position);
         if (!wordInfo) return null;
 
@@ -1021,7 +1144,7 @@ class BlDefinitionProvider {
 
             for (const owner of owners) {
                 if (isCall) {
-                    if (inlineContext && inlineContext.locals && owner === contextClass) {
+                    if (chainAtWord.segments[0].name !== 'super' && inlineContext && inlineContext.locals && owner === contextClass) {
                         const localMethod = inlineContext.locals.methods.get(wordInfo.word);
                         if (localMethod) {
                             results.push(new vscode.Location(document.uri, new vscode.Position(localMethod.line, localMethod.column)));
@@ -1031,7 +1154,7 @@ class BlDefinitionProvider {
                     const found = index.findMethodInClassChain(owner, wordInfo.word);
                     if (found) results.push(...locationsForMethod(found.owner, found.method));
                 } else {
-                    if (inlineContext && inlineContext.locals && owner === contextClass) {
+                    if (chainAtWord.segments[0].name !== 'super' && inlineContext && inlineContext.locals && owner === contextClass) {
                         const localMember = inlineContext.locals.members.get(wordInfo.word);
                         if (localMember) {
                             results.push(new vscode.Location(document.uri, new vscode.Position(localMember.line, localMember.column)));
@@ -1045,7 +1168,7 @@ class BlDefinitionProvider {
 
             return results.length > 0 ? uniqueLocations(results) : null;
         }
-        const local = findLocalVariableDefinition(document, position, wordInfo.word);
+        const local = !isCall && findLocalVariableDefinition(document, position, wordInfo.word);
         if (local) {
             return new vscode.Location(document.uri, new vscode.Position(local.line, local.column));
         }
@@ -1093,70 +1216,103 @@ class BlDefinitionProvider {
 
 class BlReferenceProvider {
     async provideReferences(document, position, context, token) {
+        const cancelled = () => disposed || token && token.isCancellationRequested;
+        if (cancelled()) return [];
+        await ensureIndexReady(token);
         const wordInfo = getWordAtPosition(document, position);
-        if (!wordInfo) return [];
+        if (!wordInfo || cancelled()) return [];
+        const requestVersion = document.version;
+        const openDocuments = new Map(vscode.workspace.textDocuments.filter(doc => doc.languageId === 'bl').map(doc => [doc.uri.fsPath, doc]));
+        openDocuments.set(document.uri.fsPath, document);
+        for (const doc of openDocuments.values()) updateIndexFromDocument(doc);
 
         const definitions = new BlDefinitionProvider();
         const target = await definitions.provideDefinition(document, position, token);
         const targets = (Array.isArray(target) ? target : target ? [target] : []);
-        if (!targets.length) return [];
+        if (!targets.length || cancelled()) return [];
         const locationKey = location => `${location.uri.fsPath}:${location.range.start.line}:${location.range.start.character}`;
         const targetKeys = new Set(targets.map(locationKey));
-
         const results = [];
-        const blFiles = await vscode.workspace.findFiles('**/*.bl', '**/node_modules/**');
-        const openDocuments = new Map(vscode.workspace.textDocuments.filter(doc => doc.languageId === 'bl').map(doc => [doc.uri.fsPath, doc]));
-        openDocuments.set(document.uri.fsPath, document);
-        const fileUris = new Map(blFiles.map(uri => [uri.fsPath, uri]));
-        for (const doc of openDocuments.values()) fileUris.set(doc.uri.fsPath, doc.uri);
-
-        for (const fileUri of fileUris.values()) {
-            if (token && token.isCancellationRequested) break;
-            let content;
-            try {
-                content = openDocuments.has(fileUri.fsPath) ? openDocuments.get(fileUri.fsPath).getText() : fs.readFileSync(fileUri.fsPath, 'utf8');
-            } catch (err) {
-                continue;
-            }
-            const lines = sanitizeText(content).split(/\r?\n/);
-            const rawLines = content.split(/\r?\n/);
-            const candidateDocument = openDocuments.get(fileUri.fsPath) || {
-                uri: fileUri,
-                getText: range => !range ? content : lines[range.start.line].slice(range.start.character, range.end.character),
-                lineAt: line => ({ text: rawLines[line] }),
-                getWordRangeAtPosition(pos) {
-                    const regex = /\w+/g;
-                    let match;
-                    while ((match = regex.exec(lines[pos.line]))) {
-                        if (pos.character >= match.index && pos.character < match.index + match[0].length) {
-                            return new vscode.Range(pos.line, match.index, pos.line, match.index + match[0].length);
+        const files = new Set(index.getReferenceCandidates(wordInfo.word));
+        const regex = new RegExp(`\\b${escapeRegex(wordInfo.word)}\\b`, 'g');
+        let lastYield = Date.now();
+        let failedFiles = 0;
+        for (const file of files) {
+            if (cancelled() || document.version !== requestVersion) return [];
+            let candidateDocument = openDocuments.get(file);
+            let analysis;
+            const fileUri = candidateDocument ? candidateDocument.uri : vscode.Uri.file(file);
+            if (!candidateDocument) {
+                try {
+                    const content = await fs.promises.readFile(file, 'utf8');
+                    if (cancelled()) return [];
+                    analysis = new DocumentAnalysis(content);
+                    const rawLines = content.split(/\r?\n/);
+                    candidateDocument = {
+                        uri: fileUri, languageId: 'bl',
+                        getText: range => !range ? content : rawLines[range.start.line].slice(range.start.character, range.end.character),
+                        lineAt: line => ({ text: rawLines[line] }),
+                        getWordRangeAtPosition(pos) {
+                            const wordRegex = /\w+/g;
+                            let match;
+                            while ((match = wordRegex.exec(analysis.lines[pos.line]))) {
+                                if (pos.character >= match.index && pos.character < match.index + match[0].length) {
+                                    return new vscode.Range(pos.line, match.index, pos.line, match.index + match[0].length);
+                                }
+                            }
+                            return null;
                         }
+                    };
+                    lexicalDocuments.set(candidateDocument, { analysis });
+                } catch (error) {
+                    if (error.code === 'ENOENT') index.removeFile(file);
+                    else {
+                        failedFiles++;
+                        if (debugOutput) debugOutput.appendLine(`Reference read error: ${file}: ${error.message}`);
                     }
-                    return null;
+                    continue;
                 }
-            };
-            for (let i = 0; i < lines.length; i++) {
-                if (token && token.isCancellationRequested) break;
-                const regex = new RegExp(`\\b${escapeRegex(wordInfo.word)}\\b`, 'g');
+            }
+            analysis = analysis || getAnalysis(candidateDocument);
+            updateIndexFromDocument(candidateDocument);
+            const version = candidateDocument.version;
+            for (let line = 0; line < analysis.lines.length; line++) {
+                regex.lastIndex = 0;
                 let match;
-                while ((match = regex.exec(lines[i]))) {
-                    if (token && token.isCancellationRequested) break;
-                    const location = new vscode.Location(fileUri, new vscode.Position(i, match.index));
+                while ((match = regex.exec(analysis.lines[line]))) {
+                    if (Date.now() - lastYield >= 8) {
+                        await yieldToHost();
+                        lastYield = Date.now();
+                    }
+                    if (cancelled() || candidateDocument.version !== version || document.version !== requestVersion) return [];
+                    const location = new vscode.Location(fileUri, new vscode.Position(line, match.index));
                     if (!context.includeDeclaration && targetKeys.has(locationKey(location))) continue;
                     const resolved = await definitions.provideDefinition(candidateDocument, location.range.start, token);
+                    if (cancelled() || candidateDocument.version !== version) return [];
                     const candidates = Array.isArray(resolved) ? resolved : resolved ? [resolved] : [];
                     if (candidates.some(candidate => targetKeys.has(locationKey(candidate)))) results.push(location);
                 }
             }
+            if (Date.now() - lastYield >= 8) {
+                await yieldToHost();
+                lastYield = Date.now();
+            }
         }
-
+        if (cancelled() || document.version !== requestVersion) return [];
+        if (failedFiles) vscode.window.showWarningMessage(`Поиск ссылок BL неполный: не удалось прочитать ${failedFiles} файлов. Подробности в BL Debug.`);
         return results;
     }
 }
 
 class BlCodeLensProvider {
+    constructor() {
+        this.changes = new vscode.EventEmitter();
+        this.onDidChangeCodeLenses = this.changes.event;
+    }
+
     async provideCodeLenses(document, token) {
         const codeLenses = [];
+        if (!configuration(document).get('codeLens.enabled', true) || token && token.isCancellationRequested) return codeLenses;
         const text = document.getText();
 
         const nativeClass = getNativeAttribute(text);
@@ -1198,7 +1354,7 @@ class BlCodeLensProvider {
             }
         }
 
-        return codeLenses;
+        return token && token.isCancellationRequested ? [] : codeLenses;
     }
 }
 
@@ -1537,7 +1693,8 @@ function showLineAnalysis(outputChannel) {
                     pos,
                     first.name,
                     inlineContext,
-                    baseContext
+                    baseContext,
+                    first.isCall
                 );
             outputChannel.appendLine(`ForceClass: ${forceClass}`);
             outputChannel.appendLine(
@@ -1628,12 +1785,11 @@ function showDiagnosticsDump(outputChannel) {
 }
 
 async function activate(context) {
-    await buildIndex();
-    for (const doc of vscode.workspace.textDocuments) {
-        if (doc.languageId === 'bl') updateIndexFromDocument(doc);
-    }
-    const diagnostics = vscode.languages.createDiagnosticCollection('bl');
+    disposed = false;
     debugOutput = vscode.window.createOutputChannel('BL Debug');
+    await rebuildIndex();
+    const diagnostics = vscode.languages.createDiagnosticCollection('bl');
+    diagnosticsCollection = diagnostics;
     debugOutput.appendLine('BL Language Support activated');
 
     const selector = { language: 'bl', scheme: 'file' };
@@ -1644,9 +1800,9 @@ async function activate(context) {
     context.subscriptions.push(
         vscode.languages.registerReferenceProvider(selector, new BlReferenceProvider())
     );
-    context.subscriptions.push(
-        vscode.languages.registerCodeLensProvider(selector, new BlCodeLensProvider())
-    );
+    const codeLensProvider = new BlCodeLensProvider();
+    context.subscriptions.push(vscode.languages.registerCodeLensProvider(selector, codeLensProvider));
+    context.subscriptions.push(codeLensProvider.changes);
     context.subscriptions.push(
         vscode.languages.registerHoverProvider(selector, new BlHoverProvider())
     );
@@ -1668,19 +1824,69 @@ async function activate(context) {
     );
 
     const watcher = vscode.workspace.createFileSystemWatcher('**/*.bl');
-    watcher.onDidCreate(uri => index.updateFile(uri.fsPath));
-    watcher.onDidChange(uri => index.updateFile(uri.fsPath));
-    watcher.onDidDelete(uri => index.removeFile(uri.fsPath));
+    watcher.onDidCreate(() => scheduleDiscovery());
+    watcher.onDidChange(uri => workspaceFiles.has(uri.fsPath) ? refreshFile(uri) : undefined);
+    watcher.onDidDelete(uri => {
+        pendingReads.delete(uri.fsPath);
+        workspaceFiles.delete(uri.fsPath);
+        index.removeFile(uri.fsPath);
+        for (const doc of vscode.workspace.textDocuments) scheduleDiagnostics(doc, diagnostics);
+    });
+    const javaWatcher = vscode.workspace.createFileSystemWatcher('**/*.java');
+    const javaChanged = (uri, pathsChanged) => {
+        attributeDefinitions.delete(uri.fsPath);
+        if (pathsChanged) for (const className of javaFiles.keys()) {
+            const suffix = '/' + className.replace(/\./g, '/') + '.java';
+            if (uri.fsPath.split(path.sep).join('/').endsWith(suffix)) javaFiles.delete(className);
+        }
+        clearTimeout(javaLensTimer);
+        javaLensTimer = setTimeout(() => codeLensProvider.changes.fire(), 100);
+    };
+    javaWatcher.onDidCreate(uri => javaChanged(uri, true));
+    javaWatcher.onDidChange(uri => javaChanged(uri, false));
+    javaWatcher.onDidDelete(uri => javaChanged(uri, true));
     context.subscriptions.push(watcher);
+    context.subscriptions.push(javaWatcher);
     context.subscriptions.push(diagnostics);
     context.subscriptions.push(debugOutput);
 
-    context.subscriptions.push(vscode.workspace.onDidOpenTextDocument(doc => updateDiagnostics(doc, diagnostics)));
-    context.subscriptions.push(vscode.workspace.onDidChangeTextDocument(event => updateDiagnostics(event.document, diagnostics)));
-    context.subscriptions.push(vscode.workspace.onDidCloseTextDocument(doc => {
-        diagnostics.delete(doc.uri);
-        if (doc.languageId === 'bl') index.updateFile(doc.uri.fsPath);
+    context.subscriptions.push(vscode.workspace.onDidOpenTextDocument(doc => {
+        if (doc.languageId !== 'bl') return;
+        dirtyDocuments.add(doc);
+        updateDiagnostics(doc, diagnostics);
     }));
+    context.subscriptions.push(vscode.workspace.onDidChangeTextDocument(event => {
+        if (event.document.languageId !== 'bl') return;
+        if (!event.contentChanges || event.contentChanges.length) {
+            dirtyDocuments.add(event.document);
+            scheduleDiagnostics(event.document, diagnostics);
+        }
+    }));
+    context.subscriptions.push(vscode.workspace.onDidSaveTextDocument(doc => {
+        if (doc.languageId !== 'bl') return;
+        updateIndexFromDocument(doc);
+        updateDiagnostics(doc, diagnostics);
+        for (const other of vscode.workspace.textDocuments) if (other !== doc) scheduleDiagnostics(other, diagnostics);
+    }));
+    context.subscriptions.push(vscode.workspace.onDidCloseTextDocument(doc => {
+        dirtyDocuments.delete(doc);
+        if (doc.languageId !== 'bl') return;
+        cancelDiagnostics(doc);
+        lexicalDocuments.delete(doc);
+        documentIndex.delete(doc);
+        diagnostics.delete(doc.uri);
+        if (doc.languageId === 'bl' && workspaceFiles.has(doc.uri.fsPath)) refreshFile(doc.uri);
+        else index.removeFile(doc.uri.fsPath);
+    }));
+    context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(event => {
+        if (event.affectsConfiguration('bl.index.exclude')) rebuildIndex();
+        if (event.affectsConfiguration('bl.codeLens.enabled')) codeLensProvider.changes.fire();
+        if (event.affectsConfiguration('bl.diagnostics')) {
+            for (const doc of vscode.workspace.textDocuments) updateDiagnostics(doc, diagnostics);
+        }
+    }));
+    context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => { invalidateJava(); rebuildIndex(); }));
+    context.subscriptions.push({ dispose: deactivate });
 
     if (vscode.window.activeTextEditor) {
         updateDiagnostics(vscode.window.activeTextEditor.document, diagnostics);
@@ -1689,6 +1895,23 @@ async function activate(context) {
     console.log('BL Language Support extension activated');
 }
 
-function deactivate() { }
+function deactivate() {
+    disposed = true;
+    buildGeneration++;
+    clearTimeout(discoveryTimer);
+    clearTimeout(javaLensTimer);
+    discoveryTimer = null;
+    for (const pending of diagnosticTimers.values()) clearTimeout(pending.timer);
+    diagnosticTimers.clear();
+    dirtyDocuments.clear();
+    pendingReads.clear();
+    invalidateJava();
+    documentIndex = new WeakMap();
+    lexicalDocuments = new WeakMap();
+    diagnosticsCollection = null;
+    workspaceFiles.clear();
+    for (const file of Array.from(index.wordFilters.keys())) index.removeFile(file);
+    index.wordHashCache.clear();
+}
 
 module.exports = { activate, deactivate };

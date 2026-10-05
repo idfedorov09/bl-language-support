@@ -17,6 +17,23 @@ test('strings and comments cannot change class depth or hide declarations', () =
     assert.equal(info.members.get('value').column, '    [name "value"] public string value;'.lastIndexOf('value'));
 });
 
+test('attributes between modifiers and types preserve members and methods', () => {
+    const content = `public class Example {
+    public [name "Type"] string type;
+    private [name "Items"] final Example[] items;
+    [request true] virtual [name "Finish"] public void finish() {}
+}`;
+    const info = parseBlContent(file, content);
+    assert.ok(info.members.has('type'));
+    assert.ok(info.members.has('items'));
+    assert.ok(info.methods.has('finish'));
+    assert.equal(info.members.get('type').column, content.split('\n')[1].lastIndexOf('type'));
+    const line = 'public [name "a]b"] [default int[] { 1 }] string value;';
+    assert.equal(stripInlineAttributes(line).indexOf('value'), line.indexOf('value'));
+    assert.ok(stripInlineAttributes(line).includes('public'));
+    assert.ok(!stripInlineAttributes(line).includes('default'));
+});
+
 test('native attribute and spaced collection types survive lexical masking', () => {
     const info = parseBlContent(file, `[native "example.Native"]
 public class Example {
