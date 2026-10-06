@@ -7,9 +7,11 @@ const {
     getBlRootFromFilePath,
     getModuleRootFromBlFile,
     sanitizeText,
-    stripInlineAttributes
+    stripInlineAttributes,
+    parseMethodSignature
 } = require('./blIndex');
 const { DocumentAnalysis, TYPE_PATTERN, METHOD_DEF_RE, STATEMENT_TYPES } = require('./documentAnalysis');
+const { createGuidNavigation } = require('./guidNavigation');
 
 const index = new BlIndex();
 let debugOutput = null;
@@ -1016,14 +1018,18 @@ function getEffectiveContext(document, position, defaultContext) {
     return defaultContext;
 }
 
+function locationForSymbol(uri, line, column, name) {
+    // VS Code tests whether the definition range contains the click position
+    // before running alternativeDefinitionCommand (references by default).
+    return new vscode.Location(uri, new vscode.Range(line, column, line, column + name.length));
+}
+
 function locationForClass(info) {
-    const pos = new vscode.Position(info.classLine || 0, info.classColumn || 0);
-    return new vscode.Location(vscode.Uri.file(info.filePath), pos);
+    return locationForSymbol(vscode.Uri.file(info.filePath), info.classLine || 0, info.classColumn || 0, info.className);
 }
 
 function locationForMember(info, member) {
-    const pos = new vscode.Position(member.line, member.column);
-    return new vscode.Location(vscode.Uri.file(info.filePath), pos);
+    return locationForSymbol(vscode.Uri.file(info.filePath), member.line, member.column, member.name);
 }
 
 function locationsForMethod(info, method) {
@@ -1044,7 +1050,7 @@ function uniqueLocations(locations) {
 }
 
 class BlDefinitionProvider {
-    async provideDefinition(document, position, token) {
+    async provideDefinition(document, position, token, followOverrideDeclaration = true) {
         if (token && token.isCancellationRequested) return null;
         await ensureIndexReady(token);
         if (token && token.isCancellationRequested) return null;
@@ -1091,7 +1097,7 @@ class BlDefinitionProvider {
         const classMatch = cleanLine.match(/\b(class|enum)\s+(\w+)/);
         if (classMatch && classMatch[2] === wordInfo.word &&
             wordStart === cleanLine.indexOf(classMatch[2], classMatch.index + classMatch[1].length)) {
-            return new vscode.Location(document.uri, wordInfo.range.start);
+            return new vscode.Location(document.uri, wordInfo.range);
         }
 
         if (isNewKeywordBefore(line, wordStart)) {
@@ -1102,13 +1108,18 @@ class BlDefinitionProvider {
         const methodDefMatch = cleanLine.match(METHOD_DEF_RE);
         if (methodDefMatch && !STATEMENT_TYPES.has(methodDefMatch[1].trim()) && methodDefMatch[2] === wordInfo.word &&
             wordStart === cleanLine.lastIndexOf(wordInfo.word, cleanLine.indexOf('('))) {
-            return new vscode.Location(document.uri, wordInfo.range.start);
+            if (followOverrideDeclaration) {
+                const declaration = { name: wordInfo.word, ...parseMethodSignature(codeLines, position.line) };
+                const overridden = index.findOverriddenMethod(contextClass, declaration, !!inlineContext, baseContextClass);
+                if (overridden) return locationsForMethod(overridden.owner, overridden.method);
+            }
+            return new vscode.Location(document.uri, wordInfo.range);
         }
 
         const fieldDefMatch = cleanLine.match(FIELD_DEF_RE);
         if (fieldDefMatch && !STATEMENT_TYPES.has(fieldDefMatch[1].trim()) && fieldDefMatch[2] === wordInfo.word &&
             wordStart === fieldDefMatch[0].lastIndexOf(wordInfo.word)) {
-            return new vscode.Location(document.uri, wordInfo.range.start);
+            return new vscode.Location(document.uri, wordInfo.range);
         }
 
         const extendsMatch = cleanLine.match(/\bextends\s+([\w.]+)/);
@@ -1147,7 +1158,7 @@ class BlDefinitionProvider {
                     if (chainAtWord.segments[0].name !== 'super' && inlineContext && inlineContext.locals && owner === contextClass) {
                         const localMethod = inlineContext.locals.methods.get(wordInfo.word);
                         if (localMethod) {
-                            results.push(new vscode.Location(document.uri, new vscode.Position(localMethod.line, localMethod.column)));
+                            results.push(locationForSymbol(document.uri, localMethod.line, localMethod.column, wordInfo.word));
                             continue;
                         }
                     }
@@ -1157,7 +1168,7 @@ class BlDefinitionProvider {
                     if (chainAtWord.segments[0].name !== 'super' && inlineContext && inlineContext.locals && owner === contextClass) {
                         const localMember = inlineContext.locals.members.get(wordInfo.word);
                         if (localMember) {
-                            results.push(new vscode.Location(document.uri, new vscode.Position(localMember.line, localMember.column)));
+                            results.push(locationForSymbol(document.uri, localMember.line, localMember.column, wordInfo.word));
                             continue;
                         }
                     }
@@ -1170,14 +1181,14 @@ class BlDefinitionProvider {
         }
         const local = !isCall && findLocalVariableDefinition(document, position, wordInfo.word);
         if (local) {
-            return new vscode.Location(document.uri, new vscode.Position(local.line, local.column));
+            return locationForSymbol(document.uri, local.line, local.column, wordInfo.word);
         }
 
         if (isCall) {
             if (inlineContext && inlineContext.locals) {
                 const localMethod = inlineContext.locals.methods.get(wordInfo.word);
                 if (localMethod) {
-                    return new vscode.Location(document.uri, new vscode.Position(localMethod.line, localMethod.column));
+                    return locationForSymbol(document.uri, localMethod.line, localMethod.column, wordInfo.word);
                 }
             }
             const found = index.findMethodInClassChain(contextClass, wordInfo.word);
@@ -1186,7 +1197,7 @@ class BlDefinitionProvider {
             if (inlineContext && inlineContext.locals) {
                 const localMember = inlineContext.locals.members.get(wordInfo.word);
                 if (localMember) {
-                    return new vscode.Location(document.uri, new vscode.Position(localMember.line, localMember.column));
+                    return locationForSymbol(document.uri, localMember.line, localMember.column, wordInfo.word);
                 }
             }
             const found = index.findMemberInClassChain(contextClass, wordInfo.word);
@@ -1227,7 +1238,9 @@ class BlReferenceProvider {
         for (const doc of openDocuments.values()) updateIndexFromDocument(doc);
 
         const definitions = new BlDefinitionProvider();
-        const target = await definitions.provideDefinition(document, position, token);
+        // Reference identity must remain the actual declaration. UI navigation
+        // from an override to its parent does not make the parent a usage.
+        const target = await definitions.provideDefinition(document, position, token, false);
         const targets = (Array.isArray(target) ? target : target ? [target] : []);
         if (!targets.length || cancelled()) return [];
         const locationKey = location => `${location.uri.fsPath}:${location.range.start.line}:${location.range.start.character}`;
@@ -1285,9 +1298,9 @@ class BlReferenceProvider {
                         lastYield = Date.now();
                     }
                     if (cancelled() || candidateDocument.version !== version || document.version !== requestVersion) return [];
-                    const location = new vscode.Location(fileUri, new vscode.Position(line, match.index));
+                    const location = locationForSymbol(fileUri, line, match.index, match[0]);
                     if (!context.includeDeclaration && targetKeys.has(locationKey(location))) continue;
-                    const resolved = await definitions.provideDefinition(candidateDocument, location.range.start, token);
+                    const resolved = await definitions.provideDefinition(candidateDocument, location.range.start, token, false);
                     if (cancelled() || candidateDocument.version !== version) return [];
                     const candidates = Array.isArray(resolved) ? resolved : resolved ? [resolved] : [];
                     if (candidates.some(candidate => targetKeys.has(locationKey(candidate)))) results.push(location);
@@ -1793,19 +1806,28 @@ async function activate(context) {
     debugOutput.appendLine('BL Language Support activated');
 
     const selector = { language: 'bl', scheme: 'file' };
+    const definitionProvider = new BlDefinitionProvider();
+    const referenceProvider = new BlReferenceProvider();
+    const guidNavigation = createGuidNavigation(vscode, {
+        index, ensureIndexReady, updateIndexFromDocument, getAnalysis, definitionProvider, referenceProvider,
+        readFile: file => fs.promises.readFile(file, 'utf8')
+    });
 
     context.subscriptions.push(
-        vscode.languages.registerDefinitionProvider(selector, new BlDefinitionProvider())
+        vscode.languages.registerDefinitionProvider(selector, guidNavigation.definitionProvider)
     );
     context.subscriptions.push(
-        vscode.languages.registerReferenceProvider(selector, new BlReferenceProvider())
+        vscode.languages.registerReferenceProvider(selector, referenceProvider)
     );
     const codeLensProvider = new BlCodeLensProvider();
     context.subscriptions.push(vscode.languages.registerCodeLensProvider(selector, codeLensProvider));
     context.subscriptions.push(codeLensProvider.changes);
-    context.subscriptions.push(
-        vscode.languages.registerHoverProvider(selector, new BlHoverProvider())
-    );
+    const importHoverProvider = new BlHoverProvider();
+    context.subscriptions.push(vscode.languages.registerHoverProvider(selector, {
+        provideHover: async (document, position, token) => importHoverProvider.provideHover(document, position, token)
+            || guidNavigation.hoverProvider.provideHover(document, position, token)
+    }));
+    guidNavigation.register(context);
 
     context.subscriptions.push(
         vscode.commands.registerCommand('bl.goToCompiledJava', goToCompiledJava)

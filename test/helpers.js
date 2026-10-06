@@ -20,14 +20,38 @@ class Location {
     }
 }
 
+class Selection extends Range {
+    constructor(anchor, active) {
+        const forward = anchor.line < active.line || (anchor.line === active.line && anchor.character <= active.character);
+        super(forward ? anchor : active, forward ? active : anchor);
+        this.anchor = anchor;
+        this.active = active;
+        this.isEmpty = anchor.line === active.line && anchor.character === active.character;
+    }
+}
+
+class MarkdownString {
+    constructor(value = '', supportThemeIcons = false) {
+        this.value = value;
+        this.supportThemeIcons = supportThemeIcons;
+    }
+    appendMarkdown(value) { this.value += value; return this; }
+    appendText(value) { this.value += value.replace(/[\\`*_{}\[\]()#+\-.!>]/g, '\\$&'); return this; }
+    appendCodeblock(value, language = '') { this.value += `\n\n\`\`\`${language}\n${value}\n\`\`\`\n`; return this; }
+}
+
 let nextVersion = 1;
 function document(filePath, text) {
     const lines = text.split(/\r?\n/);
+    const offsets = [0];
+    for (let i = 0; i < text.length; i++) if (text[i] === '\n') offsets.push(i + 1);
+    const offsetAt = position => (offsets[position.line] || 0) + position.character;
     return {
-        uri: { fsPath: filePath, scheme: 'file' }, fileName: filePath, languageId: 'bl', version: nextVersion++, isClosed: false,
+        uri: { fsPath: filePath, scheme: 'file' }, fileName: filePath, languageId: 'bl', version: nextVersion++, isClosed: false, isDirty: false,
         lineCount: lines.length,
-        lineAt: line => ({ text: lines[line] }),
-        getText: range => !range ? text : lines[range.start.line].slice(range.start.character, range.end.character),
+        lineAt: line => ({ text: lines[line], range: new Range(line, 0, line, lines[line].length) }),
+        getText: range => !range ? text : text.slice(offsetAt(range.start), offsetAt(range.end)),
+        offsetAt,
         getWordRangeAtPosition(position, regex = /\w+/) {
             const re = new RegExp(regex.source, 'g');
             let match;
@@ -85,15 +109,26 @@ async function extension(files, openDocuments = [], options = {}) {
     const mockFs = {
         readFileSync: read,
         promises: { readFile: async file => read(file) },
-        existsSync: file => contents.has(file)
+        existsSync: file => contents.has(file) || (options.checkoutRoots || []).some(root => file === path.join(root, '.git'))
     };
     const providers = {}, commands = new Map(), outputs = [], events = new Map(), watchers = new Map();
+    const guidPickers = [], guidPickerResponses = [...(options.guidPickerResponses || [])];
+    const prompts = [], quickPicks = [], messages = [], panels = [], sourceOpens = [], documentOpens = [], commandCalls = [];
+    const requiredModules = [];
+    const inputResponses = [...(options.inputResponses || [])], quickPickResponses = [...(options.quickPickResponses || [])];
     const diagnostics = new Map();
     const diagnosticWrites = new Map();
     const disposable = () => ({ dispose() {} });
     const output = { clear() { outputs.length = 0; }, appendLine(line) { outputs.push(line); }, show() {}, dispose() {} };
+    const workspaceFolders = (options.workspaceFolders || []).map((folder, index) => typeof folder === 'string'
+        ? { uri: { fsPath: folder, scheme: 'file' }, name: path.basename(folder), index }
+        : folder);
+    const isWithin = (file, folder) => file === folder || file.startsWith(folder.replace(/[\\/]$/, '') + path.sep);
     const vscode = {
-        Position, Range, Location,
+        Position, Range, Location, Selection, MarkdownString,
+        Hover: class { constructor(contents, range) { this.contents = Array.isArray(contents) ? contents : [contents]; this.range = range; } },
+        ViewColumn: { Active: -1, Beside: -2, One: 1, Two: 2 },
+        TextEditorRevealType: { InCenter: 0 },
         CodeLens: class { constructor(range, command) { Object.assign(this, { range, command }); } },
         EventEmitter: class {
             constructor() { this.listeners = new Set(); this.event = listener => { this.listeners.add(listener); return { dispose: () => this.listeners.delete(listener) }; }; }
@@ -102,9 +137,22 @@ async function extension(files, openDocuments = [], options = {}) {
         },
         Uri: { file: fsPath => ({ fsPath, scheme: 'file' }) },
         Diagnostic: class { constructor(range, message, severity) { Object.assign(this, { range, message, severity }); } },
-        DiagnosticSeverity: { Error: 0 },
+        DiagnosticSeverity: { Error: 0, Warning: 1, Information: 2, Hint: 3 },
         workspace: {
             textDocuments: openDocuments,
+            workspaceFolders,
+            getWorkspaceFolder: uri => workspaceFolders.filter(folder => isWithin(uri.fsPath, folder.uri.fsPath))
+                .sort((a, b) => b.uri.fsPath.length - a.uri.fsPath.length)[0],
+            async openTextDocument(uri) {
+                const file = typeof uri === 'string' ? uri : uri.fsPath;
+                documentOpens.push(file);
+                const existing = openDocuments.find(doc => !doc.isClosed && doc.uri.fsPath === file);
+                if (existing) return existing;
+                const opened = document(file, read(file));
+                openDocuments.push(opened);
+                if (events.has('open')) events.get('open')(opened);
+                return opened;
+            },
             getConfiguration: () => ({ get: (key, fallback) => settings[key] === undefined ? fallback : settings[key] }),
             findFiles: async (glob, exclude) => {
                 searchCounts.set(glob, (searchCounts.get(glob) || 0) + 1);
@@ -132,23 +180,111 @@ async function extension(files, openDocuments = [], options = {}) {
             getDiagnostics: uri => diagnostics.get(uri.fsPath) || [],
             registerDefinitionProvider: (selector, provider) => { providers.definition = provider; return disposable(); },
             registerReferenceProvider: (selector, provider) => { providers.references = provider; return disposable(); },
-            registerCodeLensProvider: (selector, provider) => { providers.codeLens = provider; return disposable(); }, registerHoverProvider: disposable
+            registerCodeLensProvider: (selector, provider) => { providers.codeLens = provider; return disposable(); },
+            registerHoverProvider: (selector, provider) => { providers.hover = provider; return disposable(); }
         },
-        window: { activeTextEditor: null, createOutputChannel: () => output, showWarningMessage: message => outputs.push(message) },
-        commands: { registerCommand: (name, callback) => { commands.set(name, callback); return disposable(); } }
+        window: {
+            activeTextEditor: null,
+            createOutputChannel: () => output,
+            showWarningMessage: message => { outputs.push(message); messages.push({ type: 'warning', message }); return Promise.resolve(); },
+            showInformationMessage: message => { messages.push({ type: 'information', message }); return Promise.resolve(); },
+            showErrorMessage: message => { messages.push({ type: 'error', message }); return Promise.resolve(); },
+            async showInputBox(config) { prompts.push(config); return inputResponses.shift(); },
+            async showQuickPick(items, config, token) {
+                const entries = await items;
+                quickPicks.push({ items: entries, config, token });
+                const response = quickPickResponses.shift();
+                return typeof response === 'function' ? response(entries) : typeof response === 'number' ? entries[response] : response;
+            },
+            createQuickPick() {
+                const listeners = { value: new Set(), accept: new Set(), hide: new Set() };
+                let value = '';
+                const picker = {
+                    items: [], selectedItems: [], disposed: false, hidden: false,
+                    get value() { return value; },
+                    set value(next) { value = next; for (const listener of listeners.value) listener(next); },
+                    onDidChangeValue: listener => subscribe('value', listener),
+                    onDidAccept: listener => subscribe('accept', listener),
+                    onDidHide: listener => subscribe('hide', listener),
+                    get visibleItems() {
+                        const query = value.toLowerCase();
+                        return this.items.filter(item => item.alwaysShow || [item.label,
+                            this.matchOnDescription && item.description, this.matchOnDetail && item.detail]
+                            .some(text => text && text.toLowerCase().includes(query)));
+                    },
+                    accept(item = this.visibleItems[0]) { this.selectedItems = item ? [item] : []; for (const listener of listeners.accept) listener(); },
+                    hide() { if (this.hidden) return; this.hidden = true; for (const listener of [...listeners.hide]) listener(); },
+                    dispose() { this.disposed = true; Object.values(listeners).forEach(set => set.clear()); },
+                    show() {
+                        this.initialValue = value;
+                        setImmediate(async () => {
+                            const response = guidPickerResponses.shift();
+                            if (typeof response === 'function') { await response(picker); return; }
+                            if (typeof response === 'number') picker.accept(picker.visibleItems[response]);
+                            else if (typeof response === 'string') { picker.value = response; picker.accept(); }
+                            else picker.hide();
+                        });
+                    }
+                };
+                const subscribe = (event, listener) => { listeners[event].add(listener); return { dispose: () => listeners[event].delete(listener) }; };
+                guidPickers.push(picker);
+                return picker;
+            },
+            async showTextDocument(doc, config) {
+                const position = new Position(0, 0);
+                const editor = { document: doc, selection: new Selection(position, position), reveals: [],
+                    revealRange(range, kind) { this.reveals.push({ range, kind }); } };
+                sourceOpens.push({ document: doc, config, editor });
+                vscode.window.activeTextEditor = editor;
+                return editor;
+            },
+            createWebviewPanel(viewType, title, column, config) {
+                const received = new Set(), disposal = new Set();
+                const panel = {
+                    viewType, title, column, config, disposed: false, reveals: [],
+                    webview: {
+                        html: '', cspSource: 'vscode-webview://fixture', sentMessages: [],
+                        postMessage(message) { this.sentMessages.push(message); return Promise.resolve(true); },
+                        onDidReceiveMessage(callback) { received.add(callback); return { dispose: () => received.delete(callback) }; }
+                    },
+                    onDidDispose(callback) { disposal.add(callback); return { dispose: () => disposal.delete(callback) }; },
+                    reveal(...args) { this.reveals.push(args); },
+                    async receiveMessage(message) { for (const callback of received) await callback(message); },
+                    dispose() { this.disposed = true; for (const callback of disposal) callback(); received.clear(); disposal.clear(); }
+                };
+                panels.push(panel);
+                return panel;
+            }
+        },
+        commands: {
+            registerCommand: (name, callback) => { commands.set(name, callback); return disposable(); },
+            async executeCommand(name, ...args) {
+                commandCalls.push({ name, args });
+                return commands.has(name) ? commands.get(name)(...args) : undefined;
+            }
+        }
     };
     const root = path.resolve(__dirname, '..');
     function load(file, dependencies) {
-        const context = { module: { exports: {} }, require: name => dependencies[name] || require(name), console: { log() {} }, setTimeout, clearTimeout, setImmediate };
+        const context = { module: { exports: {} }, require: name => {
+            requiredModules.push(name);
+            if (/^(?:node:)?(?:https?|net|tls|child_process)$/.test(name)) throw new Error(`Forbidden runtime I/O in fixture: ${name}`);
+            return dependencies[name] || require(name);
+        }, console: { log() {} }, setTimeout, clearTimeout, setImmediate };
         vm.runInNewContext(fs.readFileSync(path.join(root, file), 'utf8'), context, { filename: file });
         return context.module.exports;
     }
     const indexModule = load('blIndex.js', { fs: mockFs });
     const analysisModule = load('documentAnalysis.js', { './blIndex': indexModule });
-    const api = load('extension.js', { fs: mockFs, vscode, './blIndex': indexModule, './documentAnalysis': analysisModule });
+    const dependencies = { fs: mockFs, 'node:fs': mockFs, vscode, './blIndex': indexModule, './documentAnalysis': analysisModule };
+    if (fs.existsSync(path.join(root, 'recordCardView.js'))) dependencies['./recordCardView'] = load('recordCardView.js', dependencies);
+    if (fs.existsSync(path.join(root, 'guidNavigation.js'))) dependencies['./guidNavigation'] = load('guidNavigation.js', dependencies);
+    const api = load('extension.js', dependencies);
     const context = { subscriptions: [] };
     await api.activate(context);
     return { providers, commands, outputs, vscode, contents, readCounts, searchCounts, diagnosticWrites,
+        prompts, quickPicks, messages, panels, sourceOpens, documentOpens, commandCalls, requiredModules,
+        inputResponses, quickPickResponses, guidPickers, guidPickerResponses,
         open(doc) { events.get('open')(doc); },
         change(doc) { events.get('change')({ document: doc, contentChanges: [{}] }); },
         save(doc) { events.get('save')(doc); },

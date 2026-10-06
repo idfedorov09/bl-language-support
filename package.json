@@ -2,7 +2,7 @@
   "name": "bl-language-support",
   "displayName": "Поддержка языка Z8 BL",
   "description": "Поддержка языка Z8 BL для VS Code: навигация и ссылки",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "publisher": "idfedorov09",
   "license": "MIT",
   "icon": "icon.png",
@@ -32,7 +32,10 @@
     "onLanguage:bl",
     "onCommand:bl.showContext",
     "onCommand:bl.analyzeLine",
-    "onCommand:bl.dumpDiagnostics"
+    "onCommand:bl.dumpDiagnostics",
+    "onCommand:bl.lookupGuid",
+    "onCommand:bl.showRecordCard",
+    "onCommand:bl.showGuidUsages"
   ],
   "main": "./extension.js",
   "scripts": {
@@ -118,46 +121,87 @@
     "commands": [
       {
         "command": "bl.goToCompiledJava",
-        "title": "BL: Перейти к скомпилированному Java"
+        "title": "BL: Перейти к скомпилированному Java",
+        "shortTitle": "Перейти к скомпилированному Java"
       },
       {
         "command": "bl.goToNativeJava",
-        "title": "BL: Перейти к нативному Java"
+        "title": "BL: Перейти к нативному Java",
+        "shortTitle": "Перейти к нативному Java"
       },
       {
         "command": "bl.showContext",
-        "title": "BL: Показать контекст (debug)"
+        "title": "BL: Показать контекст (debug)",
+        "shortTitle": "Показать контекст (debug)"
       },
       {
         "command": "bl.analyzeLine",
-        "title": "BL: Анализ текущей строки"
+        "title": "BL: Анализ текущей строки",
+        "shortTitle": "Анализ текущей строки"
       },
       {
         "command": "bl.dumpDiagnostics",
-        "title": "BL: Вывод диагностик"
+        "title": "BL: Вывод диагностик",
+        "shortTitle": "Вывод диагностик"
+      },
+      {
+        "command": "bl.lookupGuid",
+        "title": "BL: Найти GUID",
+        "shortTitle": "Найти GUID"
+      },
+      {
+        "command": "bl.showRecordCard",
+        "title": "BL: Открыть карточку GUID / records",
+        "shortTitle": "Открыть карточку GUID / records"
+      },
+      {
+        "command": "bl.showGuidUsages",
+        "title": "BL: Найти использования GUID / records",
+        "shortTitle": "Найти использования GUID / records"
       }
     ],
     "menus": {
       "editor/context": [
         {
+          "submenu": "bl.tools",
+          "when": "resourceLangId == bl",
+          "group": "navigation@90"
+        }
+      ],
+      "bl.tools": [
+        {
+          "command": "bl.lookupGuid",
+          "group": "2_guid@1"
+        },
+        {
+          "command": "bl.showRecordCard",
+          "group": "2_guid@2"
+        },
+        {
+          "command": "bl.showGuidUsages",
+          "group": "2_guid@3"
+        },
+        {
+          "command": "bl.dumpDiagnostics",
+          "group": "3_debug@1"
+        },
+        {
+          "command": "bl.analyzeLine",
+          "group": "3_debug@2"
+        },
+        {
+          "command": "bl.showContext",
+          "group": "3_debug@3"
+        },
+        {
           "command": "bl.goToCompiledJava",
           "when": "resourceLangId == bl",
-          "group": "navigation@100"
+          "group": "1_java@1"
         },
         {
           "command": "bl.goToNativeJava",
           "when": "resourceLangId == bl",
-          "group": "navigation@101"
-        },
-        {
-          "command": "bl.analyzeLine",
-          "when": "resourceLangId == bl",
-          "group": "navigation@200"
-        },
-        {
-          "command": "bl.dumpDiagnostics",
-          "when": "resourceLangId == bl",
-          "group": "navigation@201"
+          "group": "1_java@2"
         }
       ]
     },
@@ -166,6 +210,12 @@
         "language": "bl",
         "scopeName": "source.bl",
         "path": "./syntaxes/bl.tmLanguage.json"
+      }
+    ],
+    "submenus": [
+      {
+        "id": "bl.tools",
+        "label": "Z8BL"
       }
     ]
   }

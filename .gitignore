@@ -3,3 +3,7 @@
 node_modules
 *.vsix
 dist
+
+# Specs are versioned here even when a global Git ignore hides OpenSpec.
+!openspec/
+!openspec/**

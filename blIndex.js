@@ -1,12 +1,19 @@
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { Buffer } = require('buffer');
 
 const METHOD_DEF_RE = /^\s*(?:(?:static|virtual|final|auto|abstract)\s+)*(?:public|private|protected)?\s*(?:(?:static|virtual|final|auto|abstract)\s+)*([A-Za-z_][\w.]*\s*(?:\[[^\]]*\]\s*)*)\s+(\w+)\s*\(/;
 const MEMBER_DEF_RE = /^\s*(?:(?:static|virtual|final|auto|abstract)\s+)*(?:public|private|protected)?\s*(?:(?:static|virtual|final|auto|abstract)\s+)*([A-Za-z_][\w.]*\s*(?:\[[^\]]*\]\s*)*)\s+(\w+)\s*(?:=|;|$)/;
-const RECORD_ENTRY_RE = /^\s*(\w+)\s*=/;
 const DECLARATION_MODIFIERS = new Set(['public', 'private', 'protected', 'static', 'virtual', 'final', 'auto', 'abstract']);
 const WORD_FILTER_BITS = 8192;
+const GUID_PATTERN = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+const GUID_RE = new RegExp(`^${GUID_PATTERN}$`, 'i');
+const GUID_LITERAL_RE = new RegExp(`^'(${GUID_PATTERN})'$`, 'i');
+
+function normalizeGuid(value) {
+    return typeof value === 'string' && value.length === 36 && GUID_RE.test(value) ? value.toLowerCase() : null;
+}
 
 function wordHashes(word, hashes = [0, 0]) {
     let first = 2166136261, second = 5381;
@@ -148,6 +155,185 @@ function normalizeTypeName(typeName) {
     return result;
 }
 
+// Records are declarations, not arbitrary assignments or UUIDs in expressions.
+// Use the position-preserving lexical mask for structure and a comments-only
+// mask for values, so strings/braces/comments cannot create fake declarations.
+function parseRecords(content, code, classLine, classColumn, className) {
+    const records = new Map(), recordDeclarations = [], guidConstants = [];
+    const values = sanitizeText(content, false);
+    const offsets = [0];
+    for (let i = 0; i < content.length; i++) if (content[i] === '\n') offsets.push(i + 1);
+    const positionAt = at => {
+        let low = 0, high = offsets.length;
+        while (low + 1 < high) {
+            const mid = (low + high) >>> 1;
+            if (offsets[mid] <= at) low = mid;
+            else high = mid;
+        }
+        return { line: low, column: at - offsets[low] };
+    };
+    const copy = value => Buffer.from(value, 'utf8').toString('utf8');
+    const skipSpace = (at, end) => { while (at < end && /\s/.test(code[at])) at++; return at; };
+    const closingBracket = (at, end, open, close) => {
+        let depth = 0;
+        for (let i = at; i < end; i++) {
+            if (code[i] === open) depth++;
+            else if (code[i] === close && --depth === 0) return i;
+        }
+        return -1;
+    };
+    const valueRange = (start, end) => {
+        while (start < end && /\s/.test(values[start])) start++;
+        while (end > start && /\s/.test(values[end - 1])) end--;
+        const first = positionAt(start), last = positionAt(end);
+        return { value: copy(values.slice(start, end)), valueOffset: start, valueEndOffset: end,
+            valueLine: first.line, valueColumn: first.column, valueEndLine: last.line, valueEndColumn: last.column };
+    };
+    const statementEnd = (start, end) => {
+        const stack = [];
+        const closes = { '(': ')', '[': ']', '{': '}' };
+        for (let i = start; i < end; i++) {
+            const ch = code[i];
+            if (closes[ch]) stack.push(closes[ch]);
+            else if (stack.length && ch === stack[stack.length - 1]) stack.pop();
+            else if (ch === ';' && !stack.length) return i;
+        }
+        return end;
+    };
+    const parseBody = (start, end, kind = 'record') => {
+        let cursor = start;
+        while ((cursor = skipSpace(cursor, end)) < end) {
+            if (code[cursor] === ';') { cursor++; continue; }
+            const declarationOffset = cursor;
+            const attributes = [], modifiers = [];
+            while (cursor < end) {
+                if (code[cursor] === '[') {
+                    const close = closingBracket(cursor, end, '[', ']');
+                    if (close < 0) return;
+                    const nameOffset = skipSpace(cursor + 1, close);
+                    const nameMatch = /^[A-Za-z_]\w*/.exec(code.slice(nameOffset, close));
+                    if (nameMatch) {
+                        const pos = positionAt(cursor), namePos = positionAt(nameOffset);
+                        attributes.push({ name: copy(nameMatch[0]), line: pos.line, column: pos.column,
+                            offset: cursor, endOffset: close + 1, nameOffset, nameLine: namePos.line, nameColumn: namePos.column,
+                            ...valueRange(nameOffset + nameMatch[0].length, close) });
+                    }
+                    cursor = skipSpace(close + 1, end);
+                    continue;
+                }
+                const modifier = /^[A-Za-z_]\w*/.exec(code.slice(cursor, end));
+                if (!modifier || !DECLARATION_MODIFIERS.has(modifier[0])) break;
+                modifiers.push(modifier[0]);
+                cursor = skipSpace(cursor + modifier[0].length, end);
+            }
+            if (kind === 'constant') {
+                if (!modifiers.includes('static') || !modifiers.includes('final') || !/^guid\b/.test(code.slice(cursor, end))) return;
+                cursor = skipSpace(cursor + 4, end);
+            }
+            const nameMatch = /^[A-Za-z_]\w*/.exec(code.slice(cursor, end));
+            const afterName = nameMatch && skipSpace(cursor + nameMatch[0].length, end);
+            if (!nameMatch || code[afterName] !== '=' || code[afterName + 1] === '=') {
+                cursor = statementEnd(cursor, end) + 1;
+                continue;
+            }
+            const name = copy(nameMatch[0]);
+            const endStatement = statementEnd(afterName + 1, end);
+            const value = valueRange(afterName + 1, endStatement);
+            // Z8BL UUID constants use single quotes. A string or any computed
+            // expression containing a UUID is deliberately not a static ID.
+            const literal = GUID_LITERAL_RE.exec(value.value);
+            const guid = literal ? normalizeGuid(literal[1]) : null;
+            const guidOffset = literal ? value.valueOffset + 1 : null;
+            const guidPos = literal ? positionAt(guidOffset) : null;
+            const pos = positionAt(cursor);
+            const record = { name, kind, guid, guidLiteral: literal ? copy(literal[1]) : null,
+                line: pos.line, column: pos.column, offset: cursor, endOffset: cursor + name.length,
+                declarationOffset, declarationEndOffset: Math.min(endStatement + 1, end),
+                guidOffset, guidEndOffset: literal ? guidOffset + literal[1].length : null,
+                guidLine: guidPos ? guidPos.line : null, guidColumn: guidPos ? guidPos.column : null,
+                attributes, modifiers, ...value };
+            if (kind === 'constant') { if (guid) guidConstants.push(record); }
+            else { recordDeclarations.push(record); records.set(name, record); }
+            cursor = endStatement + 1;
+        }
+    };
+    const classStart = offsets[classLine] + classColumn + className.length;
+    const bodyStart = code.indexOf('{', classStart);
+    if (bodyStart < 0) return { records, recordDeclarations, guidConstants };
+    const constantEnd = start => {
+        let cursor = start;
+        while (cursor < code.length) {
+            cursor = skipSpace(cursor, code.length);
+            if (code[cursor] === '[') {
+                const close = closingBracket(cursor, code.length, '[', ']');
+                if (close < 0) return null;
+                cursor = close + 1;
+                continue;
+            }
+            const modifier = /^[A-Za-z_]\w*/.exec(code.slice(cursor));
+            if (!modifier || !DECLARATION_MODIFIERS.has(modifier[0])) break;
+            cursor += modifier[0].length;
+        }
+        // The structural scan only calls this at outer-class depth, never for
+        // a method local, an inline class, a records RHS or arbitrary text.
+        if (!/^guid\s+[A-Za-z_]\w*\s*=(?!=)/.test(code.slice(cursor))) return null;
+        const end = statementEnd(cursor, code.length);
+        return end < code.length ? end : null;
+    };
+    let braceDepth = 1, squareDepth = 0, parenDepth = 0;
+    for (let i = bodyStart + 1; i < code.length && braceDepth > 0; i++) {
+        const ch = code[i];
+        if (braceDepth === 1 && !squareDepth && !parenDepth && (ch === '[' || /[A-Za-z_]/.test(ch))) {
+            const end = constantEnd(i);
+            if (end !== null) {
+                parseBody(i, end + 1, 'constant');
+                i = end;
+                continue;
+            }
+        }
+        if (braceDepth === 1 && !squareDepth && !parenDepth && /[A-Za-z_]/.test(ch)) {
+            const word = /^[A-Za-z_]\w*/.exec(code.slice(i))[0];
+            const next = skipSpace(i + word.length, code.length);
+            if (word === 'records' && code[next] === '{') {
+                const close = closingBracket(next, code.length, '{', '}');
+                parseBody(next + 1, close < 0 ? code.length : close);
+                if (close < 0) break;
+                i = close;
+                continue;
+            }
+            i += word.length - 1;
+        } else if (ch === '{') braceDepth++;
+        else if (ch === '}') braceDepth--;
+        else if (braceDepth === 1 && ch === '[') squareDepth++;
+        else if (braceDepth === 1 && ch === ']') squareDepth = Math.max(0, squareDepth - 1);
+        else if (braceDepth === 1 && ch === '(') parenDepth++;
+        else if (braceDepth === 1 && ch === ')') parenDepth = Math.max(0, parenDepth - 1);
+    }
+    return { records, recordDeclarations, guidConstants };
+}
+
+// Source-only signature metadata for explicit virtual declarations. Unknown or
+// incomplete parameters stay null: they cannot prove an override relationship.
+function parseMethodSignature(lines, line) {
+    const header = stripInlineAttributes(lines[line]);
+    const match = METHOD_DEF_RE.exec(header);
+    if (!match) return { modifiers: [], parameterTypes: null };
+    const modifiers = (header.slice(0, match[0].lastIndexOf(match[2])).match(/\b(?:public|private|protected|static|virtual|final|auto|abstract)\b/g) || []);
+    let parameters = header.slice(match[0].length);
+    for (let next = line + 1; !/[);{}]/.test(parameters) && next < lines.length; next++) parameters += '\n' + lines[next];
+    const close = parameters.indexOf(')');
+    if (close < 0 || /[({};]/.test(parameters.slice(0, close))) return { modifiers, parameterTypes: null };
+    parameters = parameters.slice(0, close).trim();
+    if (!parameters) return { modifiers, parameterTypes: [] };
+    const types = [];
+    for (const parameter of parameters.split(',')) {
+        const declaration = /^\s*([A-Za-z_][\w.]*(?:\s*\[[^\[\]]*\])*)\s+[A-Za-z_]\w*\s*$/.exec(parameter);
+        if (!declaration) return { modifiers, parameterTypes: null };
+        types.push(declaration[1].replace(/\s/g, ''));
+    }
+    return { modifiers, parameterTypes: types };
+}
+
 function parseBlContent(filePath, content, lexical) {
     const blRoot = getBlRootFromFilePath(filePath);
     if (!blRoot) return null;
@@ -204,18 +390,7 @@ function parseBlContent(filePath, content, lexical) {
 
         const inRecords = recordsDepth !== null && braceDepth >= recordsDepth;
         const inMemberScope = className && braceDepth === 1 && !inRecords;
-        if (inRecords) {
-            const recordMatch = candidateLine.match(RECORD_ENTRY_RE);
-            if (recordMatch) {
-                const name = recordMatch[1];
-                members.set(name, {
-                    name,
-                    typeName: 'guid',
-                    line: i,
-                    column: candidateLine.indexOf(name)
-                });
-            }
-        } else if (inMemberScope) {
+        if (inMemberScope) {
             const methodMatch = candidateLine.match(METHOD_DEF_RE);
             if (methodMatch) {
                 const returnType = methodMatch[1].trim();
@@ -224,7 +399,8 @@ function parseBlContent(filePath, content, lexical) {
                     name,
                     returnType,
                     line: i,
-                    column: candidateLine.indexOf(name, methodMatch.index + methodMatch[0].lastIndexOf(name))
+                    column: candidateLine.indexOf(name, methodMatch.index + methodMatch[0].lastIndexOf(name)),
+                    ...parseMethodSignature(codeLines, i)
                 };
                 const previous = methods.get(name);
                 methods.set(name, { ...declaration, overloads: [...(previous ? previous.overloads : []), declaration] });
@@ -286,6 +462,12 @@ function parseBlContent(filePath, content, lexical) {
     if (!className) return null;
 
     const fullName = packageName ? `${packageName}.${className}` : className;
+    const { records, recordDeclarations, guidConstants } = codeLines.some(line => /\b(?:records|guid)\b/.test(line))
+        ? parseRecords(content, sanitizeText(content), classLine, classColumn, className)
+        : { records: new Map(), recordDeclarations: [], guidConstants: [] };
+    for (const record of [...guidConstants, ...recordDeclarations]) {
+        members.set(record.name, { name: record.name, typeName: 'guid', line: record.line, column: record.column });
+    }
 
     return {
         filePath,
@@ -302,7 +484,10 @@ function parseBlContent(filePath, content, lexical) {
         nativeClassName,
         imports,
         members,
-        methods
+        methods,
+        records,
+        recordDeclarations,
+        guidConstants
     };
 }
 
@@ -312,6 +497,10 @@ class BlIndex {
         this.classesByShortName = new Map();
         this.fileToClass = new Map();
         this.wordFilters = new Map();
+        this.guidTextFilters = new Map();
+        this.fileContentHashes = new Map();
+        this.recordsByGuid = new Map();
+        this.constantsByGuid = new Map();
         this.wordHashCache = new Map();
         this.revision = 0;
     }
@@ -348,6 +537,17 @@ class BlIndex {
             addWord(filter, hashes[0], hashes[1]);
         }
         this.wordFilters.set(filePath, filter);
+        const guidRegex = new RegExp(GUID_PATTERN, 'ig');
+        let match, guidFilter = null;
+        while ((match = guidRegex.exec(content))) {
+            if (!guidFilter) guidFilter = new Uint32Array(WORD_FILTER_BITS / 32);
+            const [first, second] = wordHashes(match[0].toLowerCase());
+            addWord(guidFilter, first, second);
+        }
+        if (guidFilter) this.guidTextFilters.set(filePath, guidFilter);
+        // Stable source identity, unlike revision which also changes on a
+        // same-text reparse when VS Code opens an indexed file.
+        this.fileContentHashes.set(filePath, crypto.createHash('sha256').update(content).digest('hex'));
         this.revision++;
         return info;
     }
@@ -362,10 +562,21 @@ class BlIndex {
     }
 
     removeFile(filePath) {
-        if (this.wordFilters.delete(filePath)) this.revision++;
+        const hadWords = this.wordFilters.delete(filePath);
+        const hadGuids = this.guidTextFilters.delete(filePath);
+        this.fileContentHashes.delete(filePath);
         const existing = this.fileToClass.get(filePath);
+        if (existing || hadWords || hadGuids) this.revision++;
         if (!existing) return;
         this.fileToClass.delete(filePath);
+        for (const record of [...(existing.recordDeclarations || (existing.records ? existing.records.values() : [])), ...(existing.guidConstants || [])]) {
+            const guid = normalizeGuid(record.guid);
+            const bucket = record.kind === 'constant' ? this.constantsByGuid : this.recordsByGuid;
+            const candidates = guid && bucket.get(guid);
+            if (!candidates) continue;
+            for (const candidate of candidates) if (candidate.owner.filePath === filePath) candidates.delete(candidate);
+            if (!candidates.size) bucket.delete(guid);
+        }
         const copies = this.classesByFullName.get(existing.fullName);
         copies.delete(filePath);
         if (copies.size > 0) return;
@@ -379,6 +590,7 @@ class BlIndex {
     }
 
     addClass(info) {
+        if (this.fileToClass.has(info.filePath)) this.removeFile(info.filePath);
         this.fileToClass.set(info.filePath, info);
         if (!this.classesByFullName.has(info.fullName)) {
             this.classesByFullName.set(info.fullName, new Map());
@@ -388,6 +600,14 @@ class BlIndex {
             this.classesByShortName.set(info.className, new Set());
         }
         this.classesByShortName.get(info.className).add(info.fullName);
+        for (const record of [...(info.recordDeclarations || (info.records ? info.records.values() : [])), ...(info.guidConstants || [])]) {
+            const guid = normalizeGuid(record.guid);
+            if (!guid) continue;
+            const bucket = record.kind === 'constant' ? this.constantsByGuid : this.recordsByGuid;
+            if (!bucket.has(guid)) bucket.set(guid, new Set());
+            bucket.get(guid).add({ owner: info, record });
+        }
+        this.revision++;
     }
 
     getClassByFile(filePath) {
@@ -398,6 +618,25 @@ class BlIndex {
         const [first, second] = wordHashes(word);
         const files = new Set();
         for (const [file, filter] of this.wordFilters) if (mayContainWord(filter, first, second)) files.add(file);
+        return files;
+    }
+
+    getRecordsByGuid(value) {
+        const guid = normalizeGuid(value);
+        return guid ? Array.from(this.recordsByGuid.get(guid) || []) : [];
+    }
+
+    getGuidDeclarations(value) {
+        if (value === undefined) return [...this.recordsByGuid.values(), ...this.constantsByGuid.values()].flatMap(candidates => [...candidates]);
+        const guid = normalizeGuid(value);
+        return guid ? [...(this.recordsByGuid.get(guid) || []), ...(this.constantsByGuid.get(guid) || [])] : [];
+    }
+
+    getGuidReferenceCandidates(value) {
+        const guid = normalizeGuid(value), files = new Set();
+        if (!guid) return files;
+        const [first, second] = wordHashes(guid);
+        for (const [file, filter] of this.guidTextFilters) if (mayContainWord(filter, first, second)) files.add(file);
         return files;
     }
 
@@ -495,6 +734,39 @@ class BlIndex {
         }
         return null;
     }
+
+    findOverriddenMethod(info, declaration, inline = false, signatureOwner = info) {
+        if (!declaration || !declaration.modifiers || !declaration.modifiers.includes('virtual')
+            || declaration.modifiers.includes('static') || !declaration.parameterTypes) return null;
+        // An inline context already identifies its declared base; an ordinary
+        // class must start at its parent, not at its own override.
+        let current = inline ? info : this.resolveBaseClass(info);
+        const seen = new Set(inline ? [] : [info.filePath]);
+        const canonicalType = (owner, type) => {
+            let unresolved = false;
+            const result = type.replace(/\s/g, '').replace(/[A-Za-z_][\w.]*/g, name => {
+                if (['void', 'bool', 'int', 'decimal', 'string', 'guid', 'date', 'datespan', 'binary', 'primary', 'any'].includes(name)) return name;
+                const types = this.resolveClassName(owner, name);
+                if (types.length !== 1) { unresolved = true; return name; }
+                return types[0].fullName;
+            });
+            return unresolved ? null : result;
+        };
+        const parameters = declaration.parameterTypes.map(type => canonicalType(signatureOwner, type));
+        if (parameters.some(type => type === null)) return null;
+        while (current && !seen.has(current.filePath)) {
+            seen.add(current.filePath);
+            const method = current.methods.get(declaration.name);
+            const matches = method ? (method.overloads || [method]).filter(candidate =>
+                candidate.modifiers && candidate.modifiers.includes('virtual')
+                && !candidate.modifiers.some(modifier => ['static', 'private', 'final'].includes(modifier))
+                && candidate.parameterTypes && candidate.parameterTypes.length === parameters.length
+                && candidate.parameterTypes.every((type, position) => canonicalType(current, type) === parameters[position])) : [];
+            if (matches.length) return { owner: current, method: { ...matches[0], overloads: matches } };
+            current = this.resolveBaseClass(current);
+        }
+        return null;
+    }
 }
 
 module.exports = {
@@ -502,7 +774,9 @@ module.exports = {
     getBlRootFromFilePath,
     getModuleRootFromBlFile,
     normalizeTypeName,
+    normalizeGuid,
     sanitizeText,
     stripInlineAttributes,
+    parseMethodSignature,
     parseBlContent
 };

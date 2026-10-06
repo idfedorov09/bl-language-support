@@ -5,3 +5,6 @@ node_modules/**
 *.vsix
 AGENTS.md
 test/**
+.agents/**
+openspec/**
+CONTRIBUTING.md
