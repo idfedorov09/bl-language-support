@@ -17,8 +17,10 @@
 У расширения нет отдельного шага компиляции: исходники — CommonJS.
 
 ```sh
+npm ci --ignore-scripts
 npm test
 npm run test:corpus -- ../pro.doczilla.clm
+npm run test:request-corpus -- ../pro.doczilla.clm
 # Можно проверить несколько checkout'ов:
 npm run test:corpus -- ../pro.doczilla.clm ../pro.doczilla.cloud
 openspec validate --all --strict --no-interactive
@@ -36,6 +38,17 @@ Quick Pick (часть UUID/имя/класс, отмена, unknown), карт�
 Workspace.General, dirty refresh, видимые loading/results и keyboard tabs,
 раздельные usages, подменю Z8BL, открытие карточки/использований вкладкой без
 нового сплита и несколько checkout; task 4.2 до этого не закрывайте.
+
+JS ↔ BL regressions — `test/request-navigation.test.js`; `test:request-corpus`
+проверяет реальные CLM calls через зарегистрированные команды; `**/target/**` всегда исключён
+из JS-навигации самим плагином, включая открытые буферы.
+Перед JS editor gate проверьте JS-only activation, ПКМ → Z8BL → Найти серверные
+BL-исходники на ключах/значениях/параметрах request-объекта, раздельные классы/диспетчеры/
+ветки/обработчики с путями, пустые и partial состояния, отсутствие BL-only пунктов в JS.
+Обычные JS Cmd+Click/F12 должны остаться нативными (JS DefinitionProvider не регистрируется).
+Также проверьте Ctrl+Space в пустом/недописанном запросе, обратный Quick
+Pick (loading/empty/results/cancel), обе команды с отменой/stale защитой и вкладкой без split, dirty
+JS/BL, смену checkout и неизменность BL Shift+F12. Task 4.2 до этого не закрывать.
 
 Для проверки в **Extension Development Host** из корня репозитория:
 
@@ -123,7 +136,7 @@ openspec --version
 | Совместимые исправления, устранение ложных диагностик и улучшения производительности | **patch** |
 | Только документация, планы OpenSpec или tooling без изменения поставляемого поведения | **Без bump**, если перепубликация не нужна |
 
-Примеры от текущей `1.1.0`: исправление ложного `chain` — `1.1.1`;
+Примеры от версии `1.1.0`: исправление ложного `chain` — `1.1.1`;
 совместимый completion или новый Request Workbench — `1.2.0`;
 удаление `bl.goToCompiledJava` без совместимого пути или отказ от ранее
 поддерживаемых версий VS Code — `2.0.0`. При minor/major младшие части обнуляются;

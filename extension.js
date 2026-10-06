@@ -12,6 +12,7 @@ const {
 } = require('./blIndex');
 const { DocumentAnalysis, TYPE_PATTERN, METHOD_DEF_RE, STATEMENT_TYPES } = require('./documentAnalysis');
 const { createGuidNavigation } = require('./guidNavigation');
+const { createRequestNavigation } = require('./requestNavigation');
 
 const index = new BlIndex();
 let debugOutput = null;
@@ -1828,6 +1829,11 @@ async function activate(context) {
             || guidNavigation.hoverProvider.provideHover(document, position, token)
     }));
     guidNavigation.register(context);
+    const requestNavigation = createRequestNavigation(vscode, {
+        index, ensureIndexReady, updateIndexFromDocument,
+        readFile: file => fs.promises.readFile(file, 'utf8')
+    });
+    requestNavigation.register(context);
 
     context.subscriptions.push(
         vscode.commands.registerCommand('bl.goToCompiledJava', goToCompiledJava)

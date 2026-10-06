@@ -209,11 +209,12 @@ test('manifest keeps command IDs and one BL submenu with Java/GUID/debug groups 
     assert.equal(manifest.engines.vscode, '^1.60.0');
     const c = manifest.contributes;
     const entries = c.menus['editor/context'];
-    assert.equal(entries.length, 1); assert.equal(entries[0].submenu, 'bl.tools'); assert.equal(entries[0].when, 'resourceLangId == bl');
+    assert.equal(entries.length, 1); assert.equal(entries[0].submenu, 'bl.tools'); assert.equal(entries[0].when, 'resourceLangId == bl || resourceLangId == javascript');
     assert.ok(c.submenus.some(s => s.id === 'bl.tools' && s.label === 'Z8BL'));
     const submenu = c.menus['bl.tools'];
     assert.deepEqual(new Set(submenu.map(i => i.command)), new Set(c.commands.map(i => i.command)));
-    assert.deepEqual(new Set(submenu.map(i => i.group.split('@')[0])), new Set(['1_java', '2_guid', '3_debug']));
+    assert.deepEqual(new Set(submenu.map(i => i.group.split('@')[0])), new Set(['1_java', '1_navigation', '2_guid', '3_debug']));
+    assert.ok(submenu.every(item => item.when === (item.command === 'bl.showServerSources' ? 'resourceLangId == javascript' : 'resourceLangId == bl')));
     assert.ok(c.commands.every(command => command.title.startsWith('BL: ') && command.shortTitle && !command.shortTitle.startsWith('BL: ')));
 });
 

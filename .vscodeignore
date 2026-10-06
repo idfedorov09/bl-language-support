@@ -1,7 +1,6 @@
 .git/**
 .github/**
 .vscode-test/**
-node_modules/**
 *.vsix
 AGENTS.md
 test/**

@@ -8,7 +8,7 @@ context: |
   локальный эвристический индекс, не BL-компилятор и не language server.
   Уже есть TextMate, BL definitions/references, import hover, Java CodeLens,
   эвристическая диагностика, настройки, debug-команды и Node unit/corpus tests.
-  Completion, signature help, outline, rename, semantic tokens, JS↔BL,
+  BL completion, signature help, outline, rename, semantic tokens,
   NLS-переводы, генераторы и Request Workbench пока отсутствуют.
   GUID lookup/cards реализованы в текущем dev по запросу от 2026-10-06;
   согласованная UX revision добавляет QuickPick, static final guid-константы,
@@ -17,7 +17,13 @@ context: |
   openspec/specs фиксирует подтверждённый baseline;
   openspec/changes содержит планы и незавершённую реализацию с явным tasks status.
   Начальная задача была документацией и планированием; отдельно согласован apply
-  только add-guid-record-navigation, не остальных feature changes.
+  для add-guid-record-navigation; затем отдельно согласован add-js-bl-navigation.
+  JS↔BL код реализован в локальном dev 1.2.1: Acorn AST, BL route descriptors,
+  явная команда JS→BL через ПКМ вместо JS DefinitionProvider (Cmd+Click/F12 не перехватываются),
+  отдельный reverse Quick Pick и JS completion; unit/provider/corpus проверены,
+  editor gate не выполнен, change не архивирован/не выпущен.
+  По уточнению пользователя target/ с собранным JS всегда исключён, даже для
+  открытых буферов и при пустом index.exclude; generated события не меняют snapshots.
   Дополнительно согласована точечная навигация virtual override → базовый BL-метод
   (MessageAction.getData); прямые references и runtime Java-вызовы не смешиваются.
   Реализация, повышение версии и публикация требуют отдельного запроса пользователя.

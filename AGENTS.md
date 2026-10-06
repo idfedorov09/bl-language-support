@@ -27,6 +27,8 @@
 | `extension.js` | Definition/reference/hover/CodeLens providers, диагностика, настройки, команды и наблюдение за файлами |
 | `blIndex.js` | Эвристический парсер `.bl`, индекс классов/членов, импорты, наследование и резолвинг типов |
 | `documentAnalysis.js` | Анализ и кеши документов с сохранением координат |
+| `requestModel.js` | Строгий JS AST / tolerant completion AST, source-only BL-модель маршрутов |
+| `requestNavigation.js` | Явная команда JS→BL, hover/completion, отдельный обратный Quick Pick, scoped route index и актуальность |
 | `guidNavigation.js` | Offline GUID lookup, hover, карточки, usages и безопасные переходы к источникам |
 | `recordCardView.js` | Read-only renderer карточек records / GUID-констант и hover, CSP и экранирование |
 | `syntaxes/bl.tmLanguage.json`, `language-configuration.json` | TextMate, комментарии, скобки |
@@ -38,11 +40,13 @@
 | [.agents/skills/](.agents/skills/) | Шесть официальных локальных OpenSpec skills; прочитайте нужный `SKILL.md` |
 
 Текущее ядро — CommonJS и локальный эвристический индекс, **не компилятор и не
-language server**. JS ↔ BL, полноценный IntelliSense, NLS-переводы,
+language server**. Полноценный BL IntelliSense, NLS-переводы,
 генераторы и Request Workbench пока только запланированы; не описывайте их как готовые.
 GUID lookup и карточки реализованы в текущем `dev`, не опубликованы. Unit/corpus
 подтверждены; editor/UI gate change `add-guid-record-navigation` ещё не выполнен,
 поэтому этот change не архивирован и не перенесён в main specs.
+JS ↔ BL реализуется по `add-js-bl-navigation` в текущем `dev`; unit/provider/corpus
+проверены, отдельный editor gate не выполнен. Не архивировать change до него.
 Для BL/Z8 reference используйте соседний `../pro.doczilla.clm`, включая его
 `org.zenframework.z8`, без изменений в нём, если это не входит в задачу.
 
@@ -95,6 +99,28 @@ GUID lookup и карточки реализованы в текущем `dev`, 
   и числовые IDs из модели, не пути/URI/команды из сообщения. Не переносите
   исходники в скрипт; сохраняйте nonce CSP, escaping и проверку свежести источников.
 
+- JS request navigation требует строгого Acorn AST. Acorn-loose допустим только
+  для completion, не как evidence server sources/reverse usages. Не исполнять JS.
+- JS→BL — только явная команда `bl.showServerSources` в ПКМ → Z8BL / Command Palette.
+  Не регистрировать JavaScript DefinitionProvider и не перехватывать Cmd+Click/F12.
+  Подменю JS содержит только серверную команду; BL-only команды видны только в BL.
+- Не смешивать `request`, платформенный `action`, прикладные `method`/`name`
+  и HTTP method. Результаты JS-вызовов — отдельный Quick Pick, не BL references.
+- Маршруты разрешаются через virtual BL-диспетчеры / Action-поля с source ranges;
+  публичное имя метода само по себе не endpoint. Unknown signature/constant/route
+  остаётся unknown; не подменять случайным совпадением по имени.
+- Route index ограничен checkout; недостающие bases/imports не брать из другой
+  папки, неоднозначный dependency tie не выбирать молча. Buffer/file events,
+  revision и generation должны отменять stale targets/results; открытия исходника
+  самим picker не должны ошибочно отменять собственную навигацию.
+- Дефолт `bl.index.exclude` сохранён для BL. JS discovery дополнительно всегда
+  исключает `**/target/**` по явному запросу пользователя: generated/minified
+  bundles — не developer sources. Открытые JS-буферы target также не участвуют;
+  их события не должны инвалидировать source-кэши. Это явно описанный контракт,
+  не дедупликация найденных вызовов.
+- Production Acorn-зависимости должны входить в VSIX; не возвращать blanket
+  `node_modules/**` в `.vscodeignore`. CI/локальные тесты требуют `npm ci`.
+
 ## Отладка в VS Code
 
 После установки нового VSIX или правок в dev-хосте — **Developer: Reload Window**.
@@ -106,6 +132,8 @@ GUID lookup и карточки реализованы в текущем `dev`, 
 | `BL: Вывод диагностик` / `bl.dumpDiagnostics` | `Total diagnostics`, `Line diagnostics`, диапазоны и `[source code]` |
 | `BL: Анализ текущей строки` / `bl.analyzeLine` | `LineText`, `Chains`, `Segments` (включая `[i]`), `ForceClass`, `Candidates[n]`, `Segment[n] found=...` |
 | `BL: Показать контекст (debug)` / `bl.showContext` | Базовый/inline-контекст и разрешение выбранного символа |
+| `BL: Найти серверные BL-исходники` / `bl.showServerSources` | Курсор внутри JS request-объекта; Quick Pick класса/диспетчера/ветки/обработчика с source paths, открытие в текущей группе |
+| `BL: Найти клиентские JS-вызовы` / `bl.showClientCalls` | Курсор на имени BL request/маршрута/обработчика; отдельный Quick Pick с загрузкой, количеством и переходом в JS |
 | `BL: Найти GUID` / `bl.lookupGuid` | Quick Pick по части GUID/имени/владельцу либо `{ guid, sourceUri }`; явный выбор кандидата |
 | `BL: Открыть карточку GUID / records` / `bl.showRecordCard` | Курсор на записи/GUID либо `{ filePath, name }` или `{ guid, sourceUri }` |
 | `BL: Найти использования GUID / records` / `bl.showGuidUsages` | Та же адресация, раздельные symbol/literal/text результаты |
@@ -122,7 +150,8 @@ GUID lookup и карточки реализованы в текущем `dev`, 
 
 ## Проверки и релизные границы
 
-Обычные проверки: `npm test`, `npm run test:corpus -- ../pro.doczilla.clm`,
+Обычные проверки: `npm ci --ignore-scripts`, `npm test`, `npm run test:corpus -- ../pro.doczilla.clm`,
+`npm run test:request-corpus -- ../pro.doczilla.clm`,
 `openspec validate --all --strict --no-interactive`. Они не подтверждают UI,
 runtime Doczilla или корректность всех BL-программ. В отчёте разделите выполненные
 и невыполненные проверки, назовите затронутые файлы/проекты и ограничения.

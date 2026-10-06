@@ -17,12 +17,12 @@ OpenSpec ведётся в этом репозитории. **`specs/` — за�
 
 ## Изменения и планы
 
-Все шесть changes имеют `proposal.md`, delta `specs/`, `design.md` и `tasks.md`. Реализация отдельно согласована только для GUID lookup; у остальных changes implementation tasks не выполнены.
+Все шесть changes имеют `proposal.md`, delta `specs/`, `design.md` и `tasks.md`. Отдельно согласованы GUID lookup и JS↔BL; код и проверки описаны в их changes, editor gates остаются открыты. Остальные changes — планы.
 
 | Change | Содержание | Статус |
 | --- | --- | --- |
 | [enhance-bl-intellisense](changes/enhance-bl-intellisense/proposal.md) | Completion, signature help, auto-import, outline, semantic tokens, безопасный rename | План |
-| [add-js-bl-navigation](changes/add-js-bl-navigation/proposal.md) | JS request → BL-класс/диспетчер/обработчик, обратные вызовы, подсказки маршрутов | План |
+| [add-js-bl-navigation](changes/add-js-bl-navigation/proposal.md) | JS request → BL через ПКМ-команду (не F12), обратные вызовы, подсказки маршрутов | Код + unit/provider/corpus; target/ исключён, editor gate не выполнен |
 | [add-guid-record-navigation](changes/add-guid-record-navigation/proposal.md) | GUID lookup, карточки статических записей, различение символов и текстовых совпадений | Код + UX revision (константы, подсказки, hover, usages, подменю); unit/corpus проверены, editor gate не выполнен |
 | [add-inline-localization](changes/add-inline-localization/proposal.md) | Перевод **вместо** `"$Workspace.title$"` только визуально; default `ru`, missing — **Warning** | План |
 | [add-project-scaffolds](changes/add-project-scaffolds/proposal.md) | Классы, requests, операции, поля и records по локальным аналогам с многофайловым preview | План |
@@ -36,7 +36,7 @@ GUID change не архивируется до отдельного соглас
 - Workbench строит draft offline. `request`, `action`, прикладные `method`/`name` и HTTP method — разные вещи. Wire format учитывает Z8 POST form/multipart, а не обещает raw JSON. Открытие вкладки не отправляет запросы. Даже `action=read` не гарантирует read-only; HTTP 200 не гарантирует Z8 success.
 - JS-навигация и Workbench могут разделять descriptors маршрутов; GUID lookup и обычные генераторы работают самостоятельно. Интеграции с соседними capabilities включаются только при их наличии.
 
-GUID lookup выбран пользователем первым для реализации. Порядок остальных изменений **не согласован**; инкрементальный IntelliSense, prototype gate локализации и общий request descriptor остаются отдельными обсуждениями. Сроки и релизная версия не обещаны; большой change можно разбить до реализации.
+GUID lookup выбран пользователем первым; затем согласована JS↔BL-навигация. Порядок других изменений **не согласован**; инкрементальный IntelliSense, prototype gate локализации и общий request descriptor остаются отдельными обсуждениями. Сроки и релизная версия не обещаны; большой change можно разбить до реализации.
 
 ## Как вести изменения
 

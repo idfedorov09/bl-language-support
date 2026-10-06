@@ -47,7 +47,7 @@ function document(filePath, text) {
     for (let i = 0; i < text.length; i++) if (text[i] === '\n') offsets.push(i + 1);
     const offsetAt = position => (offsets[position.line] || 0) + position.character;
     return {
-        uri: { fsPath: filePath, scheme: 'file' }, fileName: filePath, languageId: 'bl', version: nextVersion++, isClosed: false, isDirty: false,
+        uri: { fsPath: filePath, scheme: 'file' }, fileName: filePath, languageId: filePath.endsWith('.js') ? 'javascript' : 'bl', version: nextVersion++, isClosed: false, isDirty: false,
         lineCount: lines.length,
         lineAt: line => ({ text: lines[line], range: new Range(line, 0, line, lines[line].length) }),
         getText: range => !range ? text : text.slice(offsetAt(range.start), offsetAt(range.end)),
@@ -112,6 +112,13 @@ async function extension(files, openDocuments = [], options = {}) {
         existsSync: file => contents.has(file) || (options.checkoutRoots || []).some(root => file === path.join(root, '.git'))
     };
     const providers = {}, commands = new Map(), outputs = [], events = new Map(), watchers = new Map();
+    function subscribe(map, key, callback) {
+        if (!map.has(key)) { const callbacks = new Set(); const fire = (...args) => Promise.all([...callbacks].map(fn => fn(...args))); fire.callbacks = callbacks; map.set(key, fire); }
+        map.get(key).callbacks.add(callback);
+        return { dispose: () => map.get(key).callbacks.delete(callback) };
+    }
+    const providerKey = selector => (Array.isArray(selector) ? selector[0] : selector).language === 'javascript' ? 'js' : '';
+    const addProvider = (kind, selector, provider) => { providers[providerKey(selector) ? 'js' + kind[0].toUpperCase() + kind.slice(1) : kind] = provider; return disposable(); };
     const guidPickers = [], guidPickerResponses = [...(options.guidPickerResponses || [])];
     const prompts = [], quickPicks = [], messages = [], panels = [], sourceOpens = [], documentOpens = [], commandCalls = [];
     const requiredModules = [];
@@ -126,6 +133,8 @@ async function extension(files, openDocuments = [], options = {}) {
     const isWithin = (file, folder) => file === folder || file.startsWith(folder.replace(/[\\/]$/, '') + path.sep);
     const vscode = {
         Position, Range, Location, Selection, MarkdownString,
+        CompletionItem: class { constructor(label, kind) { Object.assign(this, { label, kind }); } },
+        CompletionItemKind: { Value: 12, Property: 9 },
         Hover: class { constructor(contents, range) { this.contents = Array.isArray(contents) ? contents : [contents]; this.range = range; } },
         ViewColumn: { Active: -1, Beside: -2, One: 1, Two: 2 },
         TextEditorRevealType: { InCenter: 0 },
@@ -161,16 +170,16 @@ async function extension(files, openDocuments = [], options = {}) {
                     .map(fsPath => ({ fsPath, scheme: 'file' }));
             },
             createFileSystemWatcher: glob => ({
-                onDidCreate: callback => { watchers.set(`${glob}:create`, callback); return disposable(); },
-                onDidChange: callback => { watchers.set(`${glob}:change`, callback); return disposable(); },
-                onDidDelete: callback => { watchers.set(`${glob}:delete`, callback); return disposable(); }, dispose() {}
+                onDidCreate: callback => subscribe(watchers, `${glob}:create`, callback),
+                onDidChange: callback => subscribe(watchers, `${glob}:change`, callback),
+                onDidDelete: callback => subscribe(watchers, `${glob}:delete`, callback), dispose() {}
             }),
-            onDidOpenTextDocument: callback => { events.set('open', callback); return disposable(); },
-            onDidChangeTextDocument: callback => { events.set('change', callback); return disposable(); },
-            onDidCloseTextDocument: callback => { events.set('close', callback); return disposable(); },
-            onDidSaveTextDocument: callback => { events.set('save', callback); return disposable(); },
-            onDidChangeConfiguration: callback => { events.set('configuration', callback); return disposable(); },
-            onDidChangeWorkspaceFolders: callback => { events.set('folders', callback); return disposable(); }
+            onDidOpenTextDocument: callback => subscribe(events, 'open', callback),
+            onDidChangeTextDocument: callback => subscribe(events, 'change', callback),
+            onDidCloseTextDocument: callback => subscribe(events, 'close', callback),
+            onDidSaveTextDocument: callback => subscribe(events, 'save', callback),
+            onDidChangeConfiguration: callback => subscribe(events, 'configuration', callback),
+            onDidChangeWorkspaceFolders: callback => subscribe(events, 'folders', callback)
         },
         languages: {
             createDiagnosticCollection: () => ({ set(uri, entries) {
@@ -178,10 +187,11 @@ async function extension(files, openDocuments = [], options = {}) {
                 diagnosticWrites.set(uri.fsPath, (diagnosticWrites.get(uri.fsPath) || 0) + 1);
             }, delete(uri) { diagnostics.delete(uri.fsPath); }, dispose() {} }),
             getDiagnostics: uri => diagnostics.get(uri.fsPath) || [],
-            registerDefinitionProvider: (selector, provider) => { providers.definition = provider; return disposable(); },
-            registerReferenceProvider: (selector, provider) => { providers.references = provider; return disposable(); },
-            registerCodeLensProvider: (selector, provider) => { providers.codeLens = provider; return disposable(); },
-            registerHoverProvider: (selector, provider) => { providers.hover = provider; return disposable(); }
+            registerDefinitionProvider: (selector, provider) => addProvider('definition', selector, provider),
+            registerReferenceProvider: (selector, provider) => addProvider('references', selector, provider),
+            registerCodeLensProvider: (selector, provider) => addProvider('codeLens', selector, provider),
+            registerHoverProvider: (selector, provider) => addProvider('hover', selector, provider),
+            registerCompletionItemProvider: (selector, provider) => addProvider('completion', selector, provider)
         },
         window: {
             activeTextEditor: null,
@@ -279,6 +289,8 @@ async function extension(files, openDocuments = [], options = {}) {
     const dependencies = { fs: mockFs, 'node:fs': mockFs, vscode, './blIndex': indexModule, './documentAnalysis': analysisModule };
     if (fs.existsSync(path.join(root, 'recordCardView.js'))) dependencies['./recordCardView'] = load('recordCardView.js', dependencies);
     if (fs.existsSync(path.join(root, 'guidNavigation.js'))) dependencies['./guidNavigation'] = load('guidNavigation.js', dependencies);
+    if (fs.existsSync(path.join(root, 'requestModel.js'))) dependencies['./requestModel'] = load('requestModel.js', dependencies);
+    if (fs.existsSync(path.join(root, 'requestNavigation.js'))) dependencies['./requestNavigation'] = load('requestNavigation.js', dependencies);
     const api = load('extension.js', dependencies);
     const context = { subscriptions: [] };
     await api.activate(context);
@@ -298,7 +310,7 @@ async function extension(files, openDocuments = [], options = {}) {
             Object.assign(settings, changes);
             events.get('configuration')({ affectsConfiguration: prefix => Object.keys(changes).some(key => `bl.${key}` === prefix || `bl.${key}`.startsWith(prefix + '.')) });
         },
-        fileEvent(event, file) { return watchers.get(`${file.endsWith('.java') ? '**/*.java' : '**/*.bl'}:${event}`)({ fsPath: file, scheme: 'file' }); },
+        fileEvent(event, file) { return watchers.get(`${file.endsWith('.java') ? '**/*.java' : file.endsWith('.js') ? '**/*.js' : '**/*.bl'}:${event}`)({ fsPath: file, scheme: 'file' }); },
         foldersChanged() { events.get('folders')(); },
         dispose() { for (const subscription of context.subscriptions.slice().reverse()) subscription.dispose(); }
     };

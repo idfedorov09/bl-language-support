@@ -2,7 +2,7 @@
   "name": "bl-language-support",
   "displayName": "Поддержка языка Z8 BL",
   "description": "Поддержка языка Z8 BL для VS Code: навигация и ссылки",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "publisher": "idfedorov09",
   "license": "MIT",
   "icon": "icon.png",
@@ -35,12 +35,16 @@
     "onCommand:bl.dumpDiagnostics",
     "onCommand:bl.lookupGuid",
     "onCommand:bl.showRecordCard",
-    "onCommand:bl.showGuidUsages"
+    "onCommand:bl.showGuidUsages",
+    "onLanguage:javascript",
+    "onCommand:bl.showClientCalls",
+    "onCommand:bl.showServerSources"
   ],
   "main": "./extension.js",
   "scripts": {
     "test": "node --test test/*.test.js",
-    "test:corpus": "node test/corpus.js"
+    "test:corpus": "node test/corpus.js",
+    "test:request-corpus": "node test/request-corpus.js"
   },
   "contributes": {
     "configuration": {
@@ -158,40 +162,56 @@
         "command": "bl.showGuidUsages",
         "title": "BL: Найти использования GUID / records",
         "shortTitle": "Найти использования GUID / records"
+      },
+      {
+        "command": "bl.showClientCalls",
+        "title": "BL: Найти клиентские JS-вызовы",
+        "shortTitle": "Найти клиентские JS-вызовы"
+      },
+      {
+        "command": "bl.showServerSources",
+        "title": "BL: Найти серверные BL-исходники",
+        "shortTitle": "Найти серверные BL-исходники"
       }
     ],
     "menus": {
       "editor/context": [
         {
           "submenu": "bl.tools",
-          "when": "resourceLangId == bl",
+          "when": "resourceLangId == bl || resourceLangId == javascript",
           "group": "navigation@90"
         }
       ],
       "bl.tools": [
         {
           "command": "bl.lookupGuid",
-          "group": "2_guid@1"
+          "group": "2_guid@1",
+          "when": "resourceLangId == bl"
         },
         {
           "command": "bl.showRecordCard",
-          "group": "2_guid@2"
+          "group": "2_guid@2",
+          "when": "resourceLangId == bl"
         },
         {
           "command": "bl.showGuidUsages",
-          "group": "2_guid@3"
+          "group": "2_guid@3",
+          "when": "resourceLangId == bl"
         },
         {
           "command": "bl.dumpDiagnostics",
-          "group": "3_debug@1"
+          "group": "3_debug@1",
+          "when": "resourceLangId == bl"
         },
         {
           "command": "bl.analyzeLine",
-          "group": "3_debug@2"
+          "group": "3_debug@2",
+          "when": "resourceLangId == bl"
         },
         {
           "command": "bl.showContext",
-          "group": "3_debug@3"
+          "group": "3_debug@3",
+          "when": "resourceLangId == bl"
         },
         {
           "command": "bl.goToCompiledJava",
@@ -202,6 +222,16 @@
           "command": "bl.goToNativeJava",
           "when": "resourceLangId == bl",
           "group": "1_java@2"
+        },
+        {
+          "command": "bl.showClientCalls",
+          "when": "resourceLangId == bl",
+          "group": "1_navigation@1"
+        },
+        {
+          "command": "bl.showServerSources",
+          "when": "resourceLangId == javascript",
+          "group": "1_navigation@1"
         }
       ]
     },
@@ -218,5 +248,9 @@
         "label": "Z8BL"
       }
     ]
+  },
+  "dependencies": {
+    "acorn": "8.19.0",
+    "acorn-loose": "8.5.2"
   }
 }
