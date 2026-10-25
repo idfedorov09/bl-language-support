@@ -1,6 +1,7 @@
 .git/**
 .github/**
 .vscode-test/**
+.vscode/**
 *.vsix
 AGENTS.md
 test/**

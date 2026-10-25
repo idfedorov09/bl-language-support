@@ -8,8 +8,12 @@ context: |
   локальный эвристический индекс, не BL-компилятор и не language server.
   Уже есть TextMate, BL definitions/references, import hover, Java CodeLens,
   эвристическая диагностика, настройки, debug-команды и Node unit/corpus tests.
-  BL completion, signature help, outline, rename, semantic tokens,
-  NLS-переводы, генераторы и Request Workbench пока отсутствуют.
+  В baseline BL completion отсутствовал. В local dev 1.4.0 отдельно согласован
+  первый этап enhance-bl-intellisense: source-only scoped BL completion на existing
+  parser/index (members/overloads/inheritance/locals/indexed arrays/maps/new/import),
+  один routed provider с NLS, dirty dependencies и cancellation/version guards.
+  Unit/CLM corpus проверены, popup/Remote SSH GUI pending. Signature help, auto-import,
+  outline, BL symbol rename, semantic tokens, генераторы и Request Workbench отсутствуют.
   GUID lookup/cards реализованы в текущем dev по запросу от 2026-10-06;
   согласованная UX revision добавляет QuickPick, static final guid-константы,
   рабочие hover actions, видимые usage states и единое контекстное подменю Z8BL;
@@ -24,9 +28,31 @@ context: |
   editor gate не выполнен, change не архивирован/не выпущен.
   По уточнению пользователя target/ с собранным JS всегда исключён, даже для
   открытых буферов и при пустом index.exclude; generated события не меняют snapshots.
+  Inline localization: пользователь принял базовый prototype/reveal/Copy/Undo
+  и явно разрешил реальные NLS. В локальном dev реализован scoped XML-properties
+  индекс, default ru, display/requiredLocales, independent Warning, hover/F12/copy.
+  Soft theme-aware presentation в основном плагине; final high contrast/fonts/wrap
+  editor matrix pending. Пользователь сообщил integrated inline «вроде всё работает»,
+  отдельные high contrast/fonts/wrap не перечислил. После UX research разрешён offline
+  add-i18n-toolkit: multi-locale Edit Translation, local draft recovery, family-scoped targets (sole autoselect),
+  shared surgical XML edit-plan, preview/native Apply в буферы без auto-save.
+  Current 1.4.0 local dev (предыдущая версия 1.3.5). Compact Toolkit UI принят 2026-10-07. AI tasks 4/5
+  разрешены отдельно: input-first, SecretStorage, guarded explicit Send, draft proposals.
+  Реализован Chat Completions adapter, mock tests; live HTTP/AI GUI не проверены.
+  Toolkit targets ограничены NLS-семействами текущего key (directory + stem без locale);
+  sole source/sibling auto-selected, no file — no AI target, no auto-create/rebase.
+  Search/select/insert реализованы по tasks 3.2/3.3 на native-picker mocks.
+  UX 1/2/4/5/6: resource summary/sole source/no-file rows, explicit buffer action labels,
+  responsive AI comparison и host allowlisted config/source recovery. AI form не перестроена.
+  Localization key completion реализован по 3.1: single BL provider, shared scanner/
+  snapshot/resolver, prefix/cap/partial delimiters, chosen locale/provenance, no fallback.
+  Explicit Add language реализован по 7.8: secondary details, native no-overwrite create+XML buffer, Save explicit, shared discovery и сохранение drafts/proposals. Rename локализационных ключей реализован по 7.1: exact BL+NLS preview/guarded native buffer Apply, no auto-save/collision/ambiguity/dirty-draft migration. GUI/native Undo/release не согласованы.
   Дополнительно согласована точечная навигация virtual override → базовый BL-метод
   (MessageAction.getData); прямые references и runtime Java-вызовы не смешиваются.
-  Реализация, повышение версии и публикация требуют отдельного запроса пользователя.
+  Реализация и публикация требуют отдельного запроса пользователя.
+  По постоянному указанию от 2026-10-07 каждая итерация с изменениями получает
+  минимум patch bump, если явно не согласовано иное; один bump на итерацию.
+  Объяснения без изменений — без bump; minor/major по SemVer.
   Новые функции расширяют существующее ядро; переписывание на LSP не согласовано.
   BL/Z8 reference: соседний checkout pro.doczilla.clm, включая его org.zenframework.z8.
   Проверки расширения: npm test; npm run test:corpus -- ../pro.doczilla.clm.
@@ -53,7 +79,8 @@ operations:
   apply:
     guidance:
       - Не начинать apply без отдельного запроса на реализацию; наличие tasks.md не является разрешением.
-      - Не выполнять version bump, commit, push, запуск публикации или HTTP-запросы без отдельного запроса.
+      - Каждую итерацию с изменениями завершать минимум patch bump по постоянному указанию пользователя, если явно не согласовано иное; синхронизировать package.json/package-lock.json.
+      - Не выполнять commit, push, запуск публикации или HTTP-запросы без отдельного запроса.
   archive:
     guidance:
       - Архивировать feature change только после реализации и релевантных проверок; не превращать backlog в baseline.

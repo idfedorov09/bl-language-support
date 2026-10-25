@@ -79,22 +79,28 @@ function stripInlineAttributes(line) {
     return copied ? result + line.slice(copied) : line;
 }
 
-function sanitizeText(text, maskStrings = true) {
+function sanitizeText(text, maskStrings = true, maskedRanges = null) {
     let out = '';
     let inLine = false;
     let inBlock = false;
     let quote = null;
     let escape = false;
+    let maskedStart = -1;
+    const finishRange = (end, closed) => {
+        if (maskedRanges) maskedRanges.push({ start: maskedStart, end, closed });
+        maskedStart = -1;
+    };
 
     for (let i = 0; i < text.length; i++) {
         const ch = text[i];
         const next = text[i + 1];
         if (inLine) {
-            if (ch === '\n') inLine = false;
+            if (ch === '\n') { inLine = false; finishRange(i, false); }
             out += ch === '\n' || ch === '\r' ? ch : ' ';
         } else if (inBlock) {
             if (ch === '*' && next === '/') {
                 inBlock = false;
+                finishRange(i + 2, true);
                 out += '  ';
                 i++;
             } else {
@@ -104,19 +110,22 @@ function sanitizeText(text, maskStrings = true) {
             out += !maskStrings || ch === '\n' || ch === '\r' ? ch : ' ';
             if (escape) escape = false;
             else if (ch === '\\') escape = true;
-            else if (ch === quote) quote = null;
+            else if (ch === quote) { quote = null; finishRange(i + 1, true); }
         } else if (ch === '/' && (next === '/' || next === '*')) {
+            maskedStart = i;
             inLine = next === '/';
             inBlock = next === '*';
             out += '  ';
             i++;
         } else if (ch === '"' || ch === "'") {
+            maskedStart = i;
             quote = ch;
             out += maskStrings ? ' ' : ch;
         } else {
             out += ch;
         }
     }
+    if (maskedStart >= 0) finishRange(text.length, false);
     return out;
 }
 
@@ -317,35 +326,48 @@ function parseRecords(content, code, classLine, classColumn, className) {
 function parseMethodSignature(lines, line) {
     const header = stripInlineAttributes(lines[line]);
     const match = METHOD_DEF_RE.exec(header);
-    if (!match) return { modifiers: [], parameterTypes: null };
+    if (!match) return { modifiers: [], parameterTypes: null, parameters: null };
     const modifiers = (header.slice(0, match[0].lastIndexOf(match[2])).match(/\b(?:public|private|protected|static|virtual|final|auto|abstract)\b/g) || []);
     let parameters = header.slice(match[0].length);
     for (let next = line + 1; !/[);{}]/.test(parameters) && next < lines.length; next++) parameters += '\n' + lines[next];
     const close = parameters.indexOf(')');
-    if (close < 0 || /[({};]/.test(parameters.slice(0, close))) return { modifiers, parameterTypes: null };
+    if (close < 0 || /[({};]/.test(parameters.slice(0, close))) return { modifiers, parameterTypes: null, parameters: null };
     parameters = parameters.slice(0, close).trim();
-    if (!parameters) return { modifiers, parameterTypes: [] };
+    if (!parameters) return { modifiers, parameterTypes: [], parameters: [] };
     const types = [];
+    const declarations = [];
     for (const parameter of parameters.split(',')) {
-        const declaration = /^\s*([A-Za-z_][\w.]*(?:\s*\[[^\[\]]*\])*)\s+[A-Za-z_]\w*\s*$/.exec(parameter);
-        if (!declaration) return { modifiers, parameterTypes: null };
-        types.push(declaration[1].replace(/\s/g, ''));
+        const declaration = /^\s*([A-Za-z_][\w.]*(?:\s*\[[^\[\]]*\])*)\s+([A-Za-z_]\w*)\s*$/.exec(parameter);
+        if (!declaration) return { modifiers, parameterTypes: null, parameters: null };
+        const typeName = declaration[1].replace(/\s/g, '');
+        types.push(typeName);
+        declarations.push({ typeName, name: declaration[2] });
     }
-    return { modifiers, parameterTypes: types };
+    return { modifiers, parameterTypes: types, parameters: declarations };
 }
 
-function parseBlContent(filePath, content, lexical) {
+const importInLine = line => /^\s*import\s+([\w.]+)\s*;/.exec(line);
+
+// The file has a real source/package/import context even before its class
+// header is finished. Do not invent or index an anonymous class for completion.
+function getBlFileContext(filePath, codeLines = []) {
     const blRoot = getBlRootFromFilePath(filePath);
     if (!blRoot) return null;
-
     const relativePath = path.relative(blRoot, filePath);
     const packagePath = path.dirname(relativePath);
     const packageName = packagePath === '.' ? '' : packagePath.split(path.sep).join('.');
+    return { filePath, blRoot, moduleRoot: getModuleRootFromBlFile(filePath), relativePath, packageName,
+        imports: codeLines.flatMap(line => { const match = importInLine(line); return match ? [match[1]] : []; }) };
+}
+
+function parseBlContent(filePath, content, lexical) {
+    const fileContext = getBlFileContext(filePath);
+    if (!fileContext) return null;
+    const { blRoot, relativePath, packageName, imports } = fileContext;
 
     const codeLines = lexical ? lexical.lines : sanitizeText(content).split(/\r?\n/);
     const hasNativeAttribute = /\[(?:native|primary)\b/.test(content);
     const attributeLines = hasNativeAttribute ? sanitizeText(content, false).split(/\r?\n/) : null;
-    const imports = [];
     const members = new Map();
     const methods = new Map();
 
@@ -371,7 +393,7 @@ function parseBlContent(filePath, content, lexical) {
             nativeClassName = nativeMatch[1];
         }
 
-        const importMatch = line.match(/^\s*import\s+([\w.]+)\s*;/);
+        const importMatch = importInLine(line);
         if (importMatch) {
             imports.push(importMatch[1]);
             continue;
@@ -409,9 +431,14 @@ function parseBlContent(filePath, content, lexical) {
                 if (memberMatch) {
                     const typeName = memberMatch[1].trim();
                     const name = memberMatch[2];
+                    const modifiers = candidateLine.slice(0, memberMatch[0].lastIndexOf(name))
+                        .match(/\b(?:public|private|protected|static|virtual|final|auto|abstract)\b/g) || [];
                     members.set(name, {
                         name,
                         typeName,
+                        kind: 'field',
+                        modifiers,
+                        isStatic: modifiers.includes('static'),
                         line: i,
                         column: candidateLine.indexOf(name, memberMatch.index + memberMatch[0].lastIndexOf(name))
                     });
@@ -427,6 +454,9 @@ function parseBlContent(filePath, content, lexical) {
                             members.set(name, {
                                 name,
                                 typeName: className,
+                                kind: 'enum',
+                                modifiers: [],
+                                isStatic: true,
                                 line: i,
                                 column: candidateLine.indexOf(name)
                             });
@@ -466,7 +496,8 @@ function parseBlContent(filePath, content, lexical) {
         ? parseRecords(content, sanitizeText(content), classLine, classColumn, className)
         : { records: new Map(), recordDeclarations: [], guidConstants: [] };
     for (const record of [...guidConstants, ...recordDeclarations]) {
-        members.set(record.name, { name: record.name, typeName: 'guid', line: record.line, column: record.column });
+        members.set(record.name, { name: record.name, typeName: 'guid', kind: record.kind,
+            modifiers: record.modifiers, isStatic: true, line: record.line, column: record.column });
     }
 
     return {
@@ -642,10 +673,15 @@ class BlIndex {
 
     getClassByFullName(fullName, context) {
         const copies = this.classesByFullName.get(fullName);
-        return copies ? this.preferNearbyClasses(context, Array.from(copies.values()))[0] : null;
+        const candidates = copies ? this.preferNearbyClasses(context, Array.from(copies.values())) : [];
+        return this.classScope && candidates.length !== 1 ? null : candidates[0] || null;
     }
 
     preferNearbyClasses(context, classes) {
+        if (context && this.classScope) {
+            const scope = this.classScope(context);
+            if (scope) classes = classes.filter(info => this.classScope(info) === scope);
+        }
         if (!context || classes.length < 2) return classes;
         const contextParts = context.moduleRoot.split(path.sep);
         let best = -1;
@@ -702,13 +738,22 @@ class BlIndex {
         return this.resolveClassName(context, normalized);
     }
 
-    resolveBaseClass(info) {
+    resolveBaseClass(info, requireUnique = false) {
         if (!info) return null;
         const name = info.extendsName || (!info.nativeClassName && !info.isEnum && info.fullName !== 'org.zenframework.z8.lang.Object'
             ? 'org.zenframework.z8.lang.Object' : null);
         if (!name) return null;
         const resolved = this.resolveClassName(info, name);
-        return resolved.length > 0 ? resolved[0] : null;
+        return resolved.length > 0 && (!requireUnique || resolved.length === 1) ? resolved[0] : null;
+    }
+
+    unresolvedBase(info) {
+        const seen = new Set();
+        for (let owner = info; owner && !seen.has(owner.filePath); owner = this.resolveBaseClass(owner)) {
+            seen.add(owner.filePath);
+            if (owner.extendsName && !this.resolveBaseClass(owner)) return owner.extendsName;
+        }
+        return null;
     }
 
     findMemberInClassChain(info, name) {
@@ -773,6 +818,7 @@ module.exports = {
     BlIndex,
     getBlRootFromFilePath,
     getModuleRootFromBlFile,
+    getBlFileContext,
     normalizeTypeName,
     normalizeGuid,
     sanitizeText,

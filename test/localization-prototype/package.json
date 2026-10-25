@@ -1,0 +1,31 @@
+{
+  "name": "z8bl-localization-prototype",
+  "displayName": "Z8BL Inline Localization Prototype (dev only)",
+  "publisher": "local",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.60.0"
+  },
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:bl",
+    "onCommand:z8blPrototype.toggle",
+    "onStartupFinished",
+    "onCommand:z8blPrototype.openExample"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "z8blPrototype.toggle",
+        "title": "Z8BL Prototype: Переводы / ключи"
+      },
+      {
+        "command": "z8blPrototype.openExample",
+        "title": "Z8BL Prototype: Открыть тестовый файл"
+      }
+    ]
+  },
+  "extensionKind": [
+    "workspace"
+  ]
+}

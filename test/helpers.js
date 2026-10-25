@@ -47,7 +47,7 @@ function document(filePath, text) {
     for (let i = 0; i < text.length; i++) if (text[i] === '\n') offsets.push(i + 1);
     const offsetAt = position => (offsets[position.line] || 0) + position.character;
     return {
-        uri: { fsPath: filePath, scheme: 'file' }, fileName: filePath, languageId: filePath.endsWith('.js') ? 'javascript' : 'bl', version: nextVersion++, isClosed: false, isDirty: false,
+        uri: { fsPath: filePath, scheme: 'file' }, fileName: filePath, languageId: filePath.endsWith('.js') ? 'javascript' : filePath.endsWith('.nls') ? 'xml' : 'bl', version: nextVersion++, isClosed: false, isDirty: false,
         lineCount: lines.length,
         lineAt: line => ({ text: lines[line], range: new Range(line, 0, line, lines[line].length) }),
         getText: range => !range ? text : text.slice(offsetAt(range.start), offsetAt(range.end)),
@@ -108,10 +108,12 @@ async function extension(files, openDocuments = [], options = {}) {
     };
     const mockFs = {
         readFileSync: read,
-        promises: { readFile: async file => read(file) },
+        promises: { readFile: async file => read(file),
+            realpath: async file => options.realPaths && options.realPaths[file] || file,
+            readdir: async directory => [...new Set([...contents.keys()].filter(file => path.dirname(file) === directory).map(file => path.basename(file)))] },
         existsSync: file => contents.has(file) || (options.checkoutRoots || []).some(root => file === path.join(root, '.git'))
     };
-    const providers = {}, commands = new Map(), outputs = [], events = new Map(), watchers = new Map();
+    const providerRegistrations = [], providers = {}, commands = new Map(), outputs = [], events = new Map(), watchers = new Map();
     function subscribe(map, key, callback) {
         if (!map.has(key)) { const callbacks = new Set(); const fire = (...args) => Promise.all([...callbacks].map(fn => fn(...args))); fire.callbacks = callbacks; map.set(key, fire); }
         map.get(key).callbacks.add(callback);
@@ -119,11 +121,14 @@ async function extension(files, openDocuments = [], options = {}) {
     }
     const providerKey = selector => (Array.isArray(selector) ? selector[0] : selector).language === 'javascript' ? 'js' : '';
     const addProvider = (kind, selector, provider) => { providers[providerKey(selector) ? 'js' + kind[0].toUpperCase() + kind.slice(1) : kind] = provider; return disposable(); };
-    const guidPickers = [], guidPickerResponses = [...(options.guidPickerResponses || [])];
+    const guidPickers = [], guidPickerResponses = [...(options.pickerResponses || options.guidPickerResponses || [])];
     const prompts = [], quickPicks = [], messages = [], panels = [], sourceOpens = [], documentOpens = [], commandCalls = [];
     const requiredModules = [];
     const inputResponses = [...(options.inputResponses || [])], quickPickResponses = [...(options.quickPickResponses || [])];
     const diagnostics = new Map();
+    const localizationDiagnostics = new Map(), decorations = [], clipboard = [], appliedEdits = [], storageWrites = [];
+    const storedDrafts = options.workspaceState || new Map();
+    const storageControl = { fail: false };
     const diagnosticWrites = new Map();
     const disposable = () => ({ dispose() {} });
     const output = { clear() { outputs.length = 0; }, appendLine(line) { outputs.push(line); }, show() {}, dispose() {} };
@@ -133,8 +138,18 @@ async function extension(files, openDocuments = [], options = {}) {
     const isWithin = (file, folder) => file === folder || file.startsWith(folder.replace(/[\\/]$/, '') + path.sep);
     const vscode = {
         Position, Range, Location, Selection, MarkdownString,
+        RelativePattern: class { constructor(base, pattern) { this.base = typeof base === 'string' ? base : base.fsPath; this.pattern = pattern; } },
+        WorkspaceEdit: class { constructor() { this.entries = []; this.creates = []; }
+            createFile(uri, options) { this.creates.push({uri, options}); }
+            insert(uri, position, text) { this.replace(uri, new vscode.Range(position, position), text); }
+            replace(uri, range, text) { this.entries.push({ uri, range, text }); } },
+        ThemeColor: class { constructor(id) { this.id = id; } },
+        DecorationRangeBehavior: { ClosedClosed: 1 },
+        ConfigurationTarget: { WorkspaceFolder: 3 },
+        env: { clipboard: { writeText: async text => { clipboard.push(text); } } },
         CompletionItem: class { constructor(label, kind) { Object.assign(this, { label, kind }); } },
-        CompletionItemKind: { Value: 12, Property: 9 },
+        CompletionItemKind: { Method: 1, Field: 4, Variable: 5, Class: 6, Enum: 12, Value: 11, Property: 9, EnumMember: 19, Constant: 20 },
+        CompletionList: class { constructor(items = [], isIncomplete = false) { Object.assign(this, {items, isIncomplete}); } },
         Hover: class { constructor(contents, range) { this.contents = Array.isArray(contents) ? contents : [contents]; this.range = range; } },
         ViewColumn: { Active: -1, Beside: -2, One: 1, Two: 2 },
         TextEditorRevealType: { InCenter: 0 },
@@ -149,6 +164,32 @@ async function extension(files, openDocuments = [], options = {}) {
         DiagnosticSeverity: { Error: 0, Warning: 1, Information: 2, Hint: 3 },
         workspace: {
             textDocuments: openDocuments,
+            isTrusted: options.isTrusted !== false,
+            async applyEdit(edit) {
+                if (edit.creates.length) {
+                    if (options.beforeResourceCreate) await options.beforeResourceCreate(edit, contents, vscode);
+                    if (edit.creates.some(item => contents.has(item.uri.fsPath))) return false;
+                    for (const item of edit.creates) {
+                        contents.set(item.uri.fsPath, '');
+                        const doc = document(item.uri.fsPath, ''); openDocuments.push(doc);
+                        if (events.has('open')) await events.get('open')(doc);
+                    }
+                }
+                const groups = new Map();
+                for (const entry of edit.entries) { if (!groups.has(entry.uri.fsPath)) groups.set(entry.uri.fsPath, []); groups.get(entry.uri.fsPath).push(entry); }
+                const updates = [];
+                for (const [file, edits] of groups) {
+                    const doc = openDocuments.find(doc => !doc.isClosed && doc.uri.fsPath === file);
+                    if (!doc) return false;
+                    let text = doc.getText();
+                    for (const entry of edits.map(e => ({ start: doc.offsetAt(e.range.start), end: doc.offsetAt(e.range.end), text: e.text })).sort((a,b)=>b.start-a.start))
+                        text = text.slice(0, entry.start) + entry.text + text.slice(entry.end);
+                    updates.push([doc, text]);
+                }
+                appliedEdits.push(edit);
+                for (const [doc,text] of updates) { Object.assign(doc, document(doc.uri.fsPath,text)); doc.isDirty = true; if (events.has('change')) await events.get('change')({document:doc,contentChanges:[{}]}); }
+                return true;
+            },
             workspaceFolders,
             getWorkspaceFolder: uri => workspaceFolders.filter(folder => isWithin(uri.fsPath, folder.uri.fsPath))
                 .sort((a, b) => b.uri.fsPath.length - a.uri.fsPath.length)[0],
@@ -162,18 +203,26 @@ async function extension(files, openDocuments = [], options = {}) {
                 if (events.has('open')) events.get('open')(opened);
                 return opened;
             },
-            getConfiguration: () => ({ get: (key, fallback) => settings[key] === undefined ? fallback : settings[key] }),
+            getConfiguration: () => ({ inspect: key => ({ globalValue: (options.userConfiguration || settings)[key],
+                defaultValue: undefined, workspaceValue: (options.workspaceConfiguration || {})[key] }), get: (key, fallback) => settings[key] === undefined ? fallback : settings[key],
+                update: async (key, value) => { settings[key] = value; if (events.has('configuration')) await events.get('configuration')({ affectsConfiguration: prefix => `bl.${key}`.startsWith(prefix) }); } }),
             findFiles: async (glob, exclude) => {
-                searchCounts.set(glob, (searchCounts.get(glob) || 0) + 1);
-                const includeRegex = globRegex(glob), excludeRegex = exclude ? globRegex(exclude) : null;
-                return Array.from(contents.keys()).filter(file => includeRegex.test(file) && !(excludeRegex && excludeRegex.test(file)))
+                const pattern = typeof glob === 'string' ? glob : glob.pattern;
+                searchCounts.set(pattern, (searchCounts.get(pattern) || 0) + 1);
+                const includeRegex = globRegex(pattern), excludeRegex = exclude ? globRegex(exclude) : null;
+                return Array.from(contents.keys()).filter(file => (typeof glob === 'string'
+                    ? (!options.strictWorkspaceDiscovery || workspaceFolders.some(folder => isWithin(file, folder.uri.fsPath))) && includeRegex.test(file)
+                    : isWithin(file, glob.base) && includeRegex.test(path.relative(glob.base, file).replace(/\\/g, '/')))
+                    && !(excludeRegex && excludeRegex.test(file)))
                     .map(fsPath => ({ fsPath, scheme: 'file' }));
             },
-            createFileSystemWatcher: glob => ({
-                onDidCreate: callback => subscribe(watchers, `${glob}:create`, callback),
-                onDidChange: callback => subscribe(watchers, `${glob}:change`, callback),
-                onDidDelete: callback => subscribe(watchers, `${glob}:delete`, callback), dispose() {}
-            }),
+            createFileSystemWatcher: glob => {
+                const name = typeof glob === 'string' ? glob : path.join(glob.base, glob.pattern).replace(/\\/g, '/');
+                const subscriptions = [];
+                const on = (event, callback) => { const subscription = subscribe(watchers, `${name}:${event}`, callback); subscriptions.push(subscription); return subscription; };
+                return { onDidCreate: callback => on('create', callback), onDidChange: callback => on('change', callback),
+                    onDidDelete: callback => on('delete', callback), dispose() { for (const subscription of subscriptions) subscription.dispose(); } };
+            },
             onDidOpenTextDocument: callback => subscribe(events, 'open', callback),
             onDidChangeTextDocument: callback => subscribe(events, 'change', callback),
             onDidCloseTextDocument: callback => subscribe(events, 'close', callback),
@@ -182,21 +231,27 @@ async function extension(files, openDocuments = [], options = {}) {
             onDidChangeWorkspaceFolders: callback => subscribe(events, 'folders', callback)
         },
         languages: {
-            createDiagnosticCollection: () => ({ set(uri, entries) {
-                diagnostics.set(uri.fsPath, entries);
+            match(selector, doc) { return selector.scheme === doc.uri.scheme && globRegex(selector.pattern.pattern).test(path.relative(selector.pattern.base, doc.uri.fsPath).replace(/\\/g, '/')) ? 10 : 0; },
+            createDiagnosticCollection: name => ({ set(uri, entries) {
+                (name === 'z8bl-localization' ? localizationDiagnostics : diagnostics).set(uri.fsPath, entries);
                 diagnosticWrites.set(uri.fsPath, (diagnosticWrites.get(uri.fsPath) || 0) + 1);
-            }, delete(uri) { diagnostics.delete(uri.fsPath); }, dispose() {} }),
+            }, delete(uri) { (name === 'z8bl-localization' ? localizationDiagnostics : diagnostics).delete(uri.fsPath); }, dispose() {} }),
             getDiagnostics: uri => diagnostics.get(uri.fsPath) || [],
             registerDefinitionProvider: (selector, provider) => addProvider('definition', selector, provider),
             registerReferenceProvider: (selector, provider) => addProvider('references', selector, provider),
             registerCodeLensProvider: (selector, provider) => addProvider('codeLens', selector, provider),
             registerHoverProvider: (selector, provider) => addProvider('hover', selector, provider),
-            registerCompletionItemProvider: (selector, provider) => addProvider('completion', selector, provider)
+            registerCompletionItemProvider: (selector, provider, ...triggers) => { providerRegistrations.push({selector, provider, triggers}); return addProvider('completion', selector, provider); }
         },
         window: {
             activeTextEditor: null,
+            visibleTextEditors: [],
+            createTextEditorDecorationType: options => { const type = { options, dispose() {} }; decorations.push(type); return type; },
+            onDidChangeVisibleTextEditors: callback => subscribe(events, 'visibleEditors', callback),
+            onDidChangeTextEditorSelection: callback => subscribe(events, 'selection', callback),
+            onDidChangeActiveColorTheme: callback => subscribe(events, 'theme', callback),
             createOutputChannel: () => output,
-            showWarningMessage: message => { outputs.push(message); messages.push({ type: 'warning', message }); return Promise.resolve(); },
+            showWarningMessage: (message, ...actions) => { outputs.push(message); messages.push({ type: 'warning', message, actions }); return Promise.resolve((options.warningResponses || []).shift()); },
             showInformationMessage: message => { messages.push({ type: 'information', message }); return Promise.resolve(); },
             showErrorMessage: message => { messages.push({ type: 'error', message }); return Promise.resolve(); },
             async showInputBox(config) { prompts.push(config); return inputResponses.shift(); },
@@ -254,7 +309,7 @@ async function extension(files, openDocuments = [], options = {}) {
                     viewType, title, column, config, disposed: false, reveals: [],
                     webview: {
                         html: '', cspSource: 'vscode-webview://fixture', sentMessages: [],
-                        postMessage(message) { this.sentMessages.push(message); return Promise.resolve(true); },
+                        postMessage(message) { this.sentMessages.push(JSON.parse(JSON.stringify(message))); return Promise.resolve(true); },
                         onDidReceiveMessage(callback) { received.add(callback); return { dispose: () => received.delete(callback) }; }
                     },
                     onDidDispose(callback) { disposal.add(callback); return { dispose: () => disposal.delete(callback) }; },
@@ -280,25 +335,54 @@ async function extension(files, openDocuments = [], options = {}) {
             requiredModules.push(name);
             if (/^(?:node:)?(?:https?|net|tls|child_process)$/.test(name)) throw new Error(`Forbidden runtime I/O in fixture: ${name}`);
             return dependencies[name] || require(name);
-        }, console: { log() {} }, setTimeout, clearTimeout, setImmediate };
+        }, console: { log() {} }, Buffer, setTimeout, clearTimeout, setImmediate };
         vm.runInNewContext(fs.readFileSync(path.join(root, file), 'utf8'), context, { filename: file });
         return context.module.exports;
     }
     const indexModule = load('blIndex.js', { fs: mockFs });
     const analysisModule = load('documentAnalysis.js', { './blIndex': indexModule });
     const dependencies = { fs: mockFs, 'node:fs': mockFs, vscode, './blIndex': indexModule, './documentAnalysis': analysisModule };
+    dependencies['./projectContext'] = load('projectContext.js', dependencies);
     if (fs.existsSync(path.join(root, 'recordCardView.js'))) dependencies['./recordCardView'] = load('recordCardView.js', dependencies);
     if (fs.existsSync(path.join(root, 'guidNavigation.js'))) dependencies['./guidNavigation'] = load('guidNavigation.js', dependencies);
     if (fs.existsSync(path.join(root, 'requestModel.js'))) dependencies['./requestModel'] = load('requestModel.js', dependencies);
     if (fs.existsSync(path.join(root, 'requestNavigation.js'))) dependencies['./requestNavigation'] = load('requestNavigation.js', dependencies);
+    dependencies['./localizationModel'] = load('localizationModel.js', dependencies);
+    dependencies['./localizationPresentation'] = load('localizationPresentation.js', dependencies);
+    dependencies['./localizationCompletion'] = load('localizationCompletion.js', dependencies);
+    dependencies['./blCompletion'] = load('blCompletion.js', dependencies);
+    dependencies['./localization'] = load('localization.js', dependencies);
+    const aiModule = load('i18nAi.js', dependencies);
+    dependencies['./i18nAi'] = { ...aiModule, requestChat: (prepared, key, token) => aiModule.requestChat(prepared, key, token, options.aiRequest) };
+    for (const name of ['localizationEdits', 'i18nDraft', 'i18nView', 'i18nResources', 'i18nRename', 'i18nToolkit', 'i18nSearch']) dependencies['./' + name] = load(name + '.js', dependencies);
     const api = load('extension.js', dependencies);
-    const context = { subscriptions: [] };
+    const secrets = options.secrets || new Map(), secretWrites = [];
+    const context = { subscriptions: [], secrets: { get: async key => secrets.get(key),
+        store: async (key, value) => { secrets.set(key, value); secretWrites.push(key); }, delete: async key => { secrets.delete(key); } }, workspaceState: { get: (key, fallback) => storedDrafts.has(key) ? storedDrafts.get(key) : fallback,
+        update: async (key, value) => { if (storageControl.fail) throw Error('storage unavailable'); storedDrafts.set(key, JSON.parse(JSON.stringify(value))); storageWrites.push({ key, value }); } } };
     await api.activate(context);
-    return { providers, commands, outputs, vscode, contents, readCounts, searchCounts, diagnosticWrites,
+    return { providers, providerRegistrations, commands, outputs, vscode, contents, readCounts, searchCounts, diagnosticWrites,
         prompts, quickPicks, messages, panels, sourceOpens, documentOpens, commandCalls, requiredModules,
+        localizationDiagnostics, decorations, clipboard, appliedEdits, storedDrafts, secrets, secretWrites, storageWrites, storageControl,
+        async showEditor(doc, selection) {
+            const at = doc.positionAt(0);
+            const editor = { document: doc, selection: selection || new Selection(at, at), selections: [selection || new Selection(at, at)],
+                applied: [], setDecorations(type, values) { this.applied = values; this.decorationType = type; },
+                async edit(callback, editOptions) {
+                    if (options.beforeEditorEdit) await options.beforeEditorEdit(editor);
+                    const edit = new vscode.WorkspaceEdit(); callback({ replace: (range, text) => edit.replace(doc.uri, range, text) });
+                    editor.lastEditOptions = editOptions;
+                    if (options.editorEditResult === false || !edit.entries.length) return false;
+                    return vscode.workspace.applyEdit(edit);
+                } };
+            vscode.window.activeTextEditor = editor; vscode.window.visibleTextEditors.push(editor);
+            await events.get('visibleEditors')(); return editor;
+        },
+        selectionChanged(editor) { return events.get('selection')({ textEditor: editor }); },
+        themeChanged() { return events.get('theme')(); },
         inputResponses, quickPickResponses, guidPickers, guidPickerResponses,
-        open(doc) { events.get('open')(doc); },
-        change(doc) { events.get('change')({ document: doc, contentChanges: [{}] }); },
+        open(doc) { return events.get('open')(doc); },
+        change(doc) { return events.get('change')({ document: doc, contentChanges: [{}] }); },
         save(doc) { events.get('save')(doc); },
         close(doc) {
             const at = openDocuments.indexOf(doc);
@@ -308,9 +392,13 @@ async function extension(files, openDocuments = [], options = {}) {
         },
         configure(changes) {
             Object.assign(settings, changes);
-            events.get('configuration')({ affectsConfiguration: prefix => Object.keys(changes).some(key => `bl.${key}` === prefix || `bl.${key}`.startsWith(prefix + '.')) });
+            return events.get('configuration')({ affectsConfiguration: prefix => Object.keys(changes).some(key => `bl.${key}` === prefix || `bl.${key}`.startsWith(prefix + '.')) });
         },
-        fileEvent(event, file) { return watchers.get(`${file.endsWith('.java') ? '**/*.java' : file.endsWith('.js') ? '**/*.js' : '**/*.bl'}:${event}`)({ fsPath: file, scheme: 'file' }); },
+        fileEvent(event, file) {
+            return Promise.all([...watchers].filter(([key]) => key.endsWith(`:${event}`) && globRegex(key.slice(0, -event.length - 1)).test(file)
+                && (path.isAbsolute(key.slice(0, -event.length - 1)) || !options.strictWorkspaceDiscovery || workspaceFolders.some(folder => isWithin(file, folder.uri.fsPath))))
+                .map(([, fire]) => fire({ fsPath: file, scheme: 'file' })));
+        },
         foldersChanged() { events.get('folders')(); },
         dispose() { for (const subscription of context.subscriptions.slice().reverse()) subscription.dispose(); }
     };

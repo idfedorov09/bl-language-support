@@ -17,18 +17,21 @@ OpenSpec ведётся в этом репозитории. **`specs/` — за�
 
 ## Изменения и планы
 
-Все шесть changes имеют `proposal.md`, delta `specs/`, `design.md` и `tasks.md`. Отдельно согласованы GUID lookup и JS↔BL; код и проверки описаны в их changes, editor gates остаются открыты. Остальные changes — планы.
+Все семь changes имеют `proposal.md`, delta `specs/`, `design.md` и `tasks.md`.
+GUID, JS↔BL, NLS/Toolkit и первый этап BL completion согласованы отдельно;
+код и проверки описаны в changes, editor gates и будущие этапы остаются открыты.
 
 | Change | Содержание | Статус |
 | --- | --- | --- |
-| [enhance-bl-intellisense](changes/enhance-bl-intellisense/proposal.md) | Completion, signature help, auto-import, outline, semantic tokens, безопасный rename | План |
+| [enhance-bl-intellisense](changes/enhance-bl-intellisense/proposal.md) | Completion, signature help, auto-import, outline, semantic tokens, безопасный rename | Первый этап BL completion — код + unit/CLM corpus в local dev 1.4.0; popup/Remote SSH pending. Остальные этапы не реализованы/не согласованы |
 | [add-js-bl-navigation](changes/add-js-bl-navigation/proposal.md) | JS request → BL через ПКМ-команду (не F12), обратные вызовы, подсказки маршрутов | Код + unit/provider/corpus; target/ исключён, editor gate не выполнен |
 | [add-guid-record-navigation](changes/add-guid-record-navigation/proposal.md) | GUID lookup, карточки статических записей, различение символов и текстовых совпадений | Код + UX revision (константы, подсказки, hover, usages, подменю); unit/corpus проверены, editor gate не выполнен |
-| [add-inline-localization](changes/add-inline-localization/proposal.md) | Перевод **вместо** `"$Workspace.title$"` только визуально; default `ru`, missing — **Warning** | План |
+| [add-inline-localization](changes/add-inline-localization/proposal.md) | Перевод **вместо** `"$Workspace.title$"` только визуально; default `ru`, missing — **Warning**, мягкий theme-aware inlay-style | Базовый prototype/reveal/Copy/Undo принят пользователем; реальные NLS/settings/Warning/hover/F12 в локальном dev, localization key completion реализован по Toolkit 3.1; edits/final GUI pending |
+| [add-i18n-toolkit](changes/add-i18n-toolkit/proposal.md) | Edit Translation по языкам, key completion, поиск по переводам, optional AI draft через OpenAI-compatible API | Offline apply согласован: Edit Translation/draft recovery/preview/native Apply в локальном dev, compact UI принят; AI input-first/transport/proposals реализованы в dev на mocks, live/AI GUI pending; search/select/insert и localization completion реализованы на mocks; explicit Add language реализован на mocks; rename локализационных ключей реализован на mocks |
 | [add-project-scaffolds](changes/add-project-scaffolds/proposal.md) | Классы, requests, операции, поля и records по локальным аналогам с многофайловым preview | План |
 | [add-request-workbench](changes/add-request-workbench/proposal.md) | CodeLens → отдельная Postman-like вкладка с восстановленным request, выбором операций и ручным Send | План |
 
-GUID change не архивируется до отдельного согласования и проверки карточек/списков в настоящем редакторе. Текущая реализация offline/read-only; NLS и Workbench отсутствуют, предусмотрены только optional resolver названия и command API `{ guid, sourceUri }`. Точное состояние и evidence — в [tasks](changes/add-guid-record-navigation/tasks.md) и [design](changes/add-guid-record-navigation/design.md).
+GUID change не архивируется до отдельного согласования и проверки карточек/списков в настоящем редакторе. Текущая реализация offline/read-only; Workbench отсутствует; отдельная inline NLS-локализация не подключена к карточкам GUID, предусмотрены только optional resolver названия и command API `{ guid, sourceUri }`. Точное состояние и evidence — в [tasks](changes/add-guid-record-navigation/tasks.md) и [design](changes/add-guid-record-navigation/design.md).
 
 **Особые границы:**
 
@@ -36,7 +39,10 @@ GUID change не архивируется до отдельного соглас
 - Workbench строит draft offline. `request`, `action`, прикладные `method`/`name` и HTTP method — разные вещи. Wire format учитывает Z8 POST form/multipart, а не обещает raw JSON. Открытие вкладки не отправляет запросы. Даже `action=read` не гарантирует read-only; HTTP 200 не гарантирует Z8 success.
 - JS-навигация и Workbench могут разделять descriptors маршрутов; GUID lookup и обычные генераторы работают самостоятельно. Интеграции с соседними capabilities включаются только при их наличии.
 
-GUID lookup выбран пользователем первым; затем согласована JS↔BL-навигация. Порядок других изменений **не согласован**; инкрементальный IntelliSense, prototype gate локализации и общий request descriptor остаются отдельными обсуждениями. Сроки и релизная версия не обещаны; большой change можно разбить до реализации.
+GUID lookup выбран пользователем первым; затем согласованы JS↔BL, NLS/Toolkit и
+первый этап BL completion (2026-10-08). Порядок следующих этапов **не согласован**;
+signature help/auto-import, editor matrices и Workbench остаются отдельными
+проверками/обсуждениями. Большой change реализуется поэтапно; main specs не подменяют backlog.
 
 ## Как вести изменения
 
@@ -73,3 +79,5 @@ openspec validate --all --strict --no-interactive
 ```
 
 Skills сгенерированы командой `openspec init --tools codex --language ru --profile core --no-animation --no-copilot-cloud .`. Не запускать повторную инициализацию без необходимости и не перезаписывать project context. В `.gitignore` есть локальное исключение для `openspec/`: спеки должны попадать в Git даже при глобальном ignore. Skills, спеки и developer-инструкции исключены из VSIX через `.vscodeignore`.
+
+Toolkit использует общий NLS resolver и surgical edit-plan; offline editor реализован в локальном dev, compact UI принят пользователем. UX основания и acceptance — changes/add-i18n-toolkit/ux-research.md. Auto Translate только по кнопке с payload consent, SecretStorage и review: модель заполняет draft, не сохраняет ресурсы автоматически. Мягкая стилизация и базовые Copy/Undo приняты пользователем; main extension читает реальные NLS в локальном dev. Итоговый UI/theme gate pending, Offline Toolkit реализован; AI input-first/transport/proposals реализованы на mocks; live/AI GUI pending. Search/select/insert реализованы в dev по tasks 3.2/3.3 с native-picker mocks; localization completion реализован по 3.1; explicit Add language реализован по 7.8; rename локализационных ключей реализован по 7.1; GUI/native Undo pending.

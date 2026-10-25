@@ -1,4 +1,4 @@
-const { sanitizeText, stripInlineAttributes } = require('./blIndex');
+const { sanitizeText, stripInlineAttributes, parseMethodSignature } = require('./blIndex');
 
 const TYPE_PATTERN = String.raw`[A-Za-z_][\w.]*\s*(?:\[[^\]]*\])*`;
 const METHOD_DEF_RE = /^\s*(?:(?:static|virtual|final|auto|abstract)\s+)*(?:public|private|protected)?\s*(?:(?:static|virtual|final|auto|abstract)\s+)*([A-Za-z_][\w.]*\s*(?:\[[^\]]*\])*)\s+(\w+)\s*\(/;
@@ -18,7 +18,29 @@ function closingParen(text, start) {
 class DocumentAnalysis {
     constructor(text) {
         this.text = text;
-        this.lines = sanitizeText(text).split(/\r?\n/);
+        this.maskedRanges = [];
+        this.lines = sanitizeText(text, true, this.maskedRanges).split(/\r?\n/);
+    }
+
+    isCodePosition(position) {
+        if (!position || !Number.isInteger(position.line) || !Number.isInteger(position.character)
+            || position.line < 0 || position.line >= this.lines.length || position.character < 0
+            || position.character > this.lines[position.line].length) return false;
+        if (!this.sourceOffsets) {
+            this.sourceOffsets = [0];
+            for (let i = 0; i < this.text.length; i++) if (this.text[i] === '\n') this.sourceOffsets.push(i + 1);
+        }
+        // Scope offsets use normalized lines; lexical ranges use original text,
+        // so preserve both CRLF bytes when locating this caret.
+        const offset = this.sourceOffsets[position.line] + position.character;
+        let low = 0, high = this.maskedRanges.length;
+        while (low < high) {
+            const middle = (low + high) >>> 1;
+            if (this.maskedRanges[middle].start < offset) low = middle + 1;
+            else high = middle;
+        }
+        const range = this.maskedRanges[low - 1];
+        return !range || offset >= range.end && (range.closed || offset > range.end);
     }
 
     get cleanLines() {
@@ -63,7 +85,7 @@ class DocumentAnalysis {
                 this.parameters.get(definition.name).push(definition);
             }
             const body = nextNonSpace(end + 1);
-            if (text[body] === '{') methodOpenings.set(body, parameters);
+            if (text[body] === '{') methodOpenings.set(body, { parameters, modifiers: parseMethodSignature(lines, line).modifiers });
         }
         const classOpenings = new Set();
         const classRegex = /\b(?:class|enum)\b[^;{}]*\{/g;
@@ -83,7 +105,8 @@ class DocumentAnalysis {
                         end: text.length, declarations: new Map() };
                     if (methodOpenings.has(at)) {
                         child.method = child;
-                        for (const parameter of methodOpenings.get(at)) child.declarations.set(parameter.name, [parameter]);
+                        child.modifiers = methodOpenings.get(at).modifiers;
+                        for (const parameter of methodOpenings.get(at).parameters) child.declarations.set(parameter.name, [parameter]);
                     }
                     this.openings.set(at, child);
                     scope = child;
@@ -144,6 +167,33 @@ class DocumentAnalysis {
             scope = scope.parent;
         }
         return null;
+    }
+
+    visibleLocals(position) {
+        this.buildScopes();
+        if (!position || !Number.isInteger(position.line) || !Number.isInteger(position.character)
+            || position.line < 0 || position.line >= this.cleanLines.length || position.character < 0
+            || position.character > this.cleanLines[position.line].length) return [];
+        const offset = this.offsets[position.line] + position.character;
+        let scope = this.scopeAt(position);
+        const method = scope.method;
+        const visible = new Map();
+        // Match findLocal's lexical lifetime and nearest-declaration semantics.
+        // A declaration after the cursor must not hide a visible outer local.
+        while (scope && method && scope.method === method) {
+            for (const [name, declarations] of scope.declarations) {
+                if (visible.has(name)) continue;
+                for (let i = declarations.length - 1; i >= 0; i--) {
+                    const declaration = declarations[i];
+                    if (declaration.offset <= offset && (declaration.end === undefined || offset < declaration.end)) {
+                        visible.set(name, declaration);
+                        break;
+                    }
+                }
+            }
+            scope = scope.parent;
+        }
+        return [...visible.values()];
     }
 }
 

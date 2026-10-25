@@ -212,8 +212,10 @@ test('manifest keeps command IDs and one BL submenu with Java/GUID/debug groups 
     assert.equal(entries.length, 1); assert.equal(entries[0].submenu, 'bl.tools'); assert.equal(entries[0].when, 'resourceLangId == bl || resourceLangId == javascript');
     assert.ok(c.submenus.some(s => s.id === 'bl.tools' && s.label === 'Z8BL'));
     const submenu = c.menus['bl.tools'];
-    assert.deepEqual(new Set(submenu.map(i => i.command)), new Set(c.commands.map(i => i.command)));
-    assert.deepEqual(new Set(submenu.map(i => i.group.split('@')[0])), new Set(['1_java', '1_navigation', '2_guid', '3_debug']));
+    const paletteOnly = new Set(['bl.setTranslationApiKey', 'bl.clearTranslationApiKey']);
+    assert.deepEqual(new Set(submenu.map(i => i.command)), new Set(c.commands.filter(i => !paletteOnly.has(i.command)).map(i => i.command)));
+    assert.ok(submenu.every(i => !paletteOnly.has(i.command)), 'credentials must not clutter editor context menu');
+    assert.deepEqual(new Set(submenu.map(i => i.group.split('@')[0])), new Set(['1_java', '1_navigation', '2_guid', '2_i18n', '3_debug']));
     assert.ok(submenu.every(item => item.when === (item.command === 'bl.showServerSources' ? 'resourceLangId == javascript' : 'resourceLangId == bl')));
     assert.ok(c.commands.every(command => command.title.startsWith('BL: ') && command.shortTitle && !command.shortTitle.startsWith('BL: ')));
 });

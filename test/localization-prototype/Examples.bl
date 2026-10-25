@@ -1,0 +1,13 @@
+// DEV fixture: the existing Z8BL extension supplies the bl language.
+public class Examples {
+    string title = "$Workspace.title$";
+    string shortTitle = "$Prototype.short$";
+    string longTitle = "$Prototype.long$";
+    string special = "$Prototype.special$";
+    string multiline = "$Prototype.multiline$";
+    string unicode = "$Prototype.unicode$";
+    string missing = "$Prototype.missing$";
+    string next = "$Workspace.title$" + " / " + "$Prototype.short$";
+    // "$Workspace.title$" must remain source in a comment.
+    /* "$Workspace.title$" must remain source in a block comment. */
+}

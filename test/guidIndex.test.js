@@ -42,7 +42,8 @@ public class RoleAccess extends BaseAccess {
         assert.equal(text[attr.offset], '[');
         assert.equal(text[attr.endOffset - 1], ']');
     }
-    assert.deepEqual(info.members.get(record.name), { name: record.name, typeName: 'guid', line: record.line, column: record.column });
+    assert.deepEqual(info.members.get(record.name), { name: record.name, typeName: 'guid', kind: 'record',
+        modifiers: [], isStatic: true, line: record.line, column: record.column });
     assert.equal(info.recordDeclarations[0], record);
     assert.equal(Object.hasOwn(record, 'owner'), false, 'record metadata cannot retain a cyclic class graph');
 });
