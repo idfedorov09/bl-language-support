@@ -1,7 +1,10 @@
 .git/**
 .github/**
 .vscode-test/**
-node_modules/**
+.vscode/**
 *.vsix
 AGENTS.md
 test/**
+.agents/**
+openspec/**
+CONTRIBUTING.md

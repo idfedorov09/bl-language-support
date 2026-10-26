@@ -3,3 +3,12 @@
 node_modules
 *.vsix
 dist
+
+# Specs are versioned here even when a global Git ignore hides OpenSpec.
+!openspec/
+!openspec/**
+
+# Share the debug launch config, but keep other editor settings local.
+!.vscode/
+.vscode/*
+!.vscode/launch.json
